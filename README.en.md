@@ -4,36 +4,43 @@
 
 # SayaTech-Midi-Studio
 
-**A Windows MIDI auto-play studio with piano / drum playback, auto tuning, splash screen, themes, and glass-style UI.**
+**A Windows MIDI auto-play tool for the in-game instruments of “星痕共鸣”.**  
+It includes piano and drum modes, auto tuning tools, ensemble timing, theme customization, and a modern desktop UI.
 
 [简体中文](README.md) · [English](README.en.md) · [日本語](README.ja.md)
+
 [![Repository](https://img.shields.io/badge/GitHub-ShiroiSaya%2FSayaTech-Midi-Studio-181717?logo=github)](https://github.com/ShiroiSaya/SayaTech-Midi-Studio)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-
-**Repository:** <https://github.com/ShiroiSaya/SayaTech-Midi-Studio>
-
-```bash
-git clone https://github.com/ShiroiSaya/SayaTech-Midi-Studio.git
-cd SayaTech-Midi-Studio
-```
-
 
 <img src="docs/assets/banner.png" alt="SayaTech-Midi-Studio Banner">
 
 </div>
 
+## Overview
+
+SayaTech-Midi-Studio converts MIDI files into keyboard input for the instrument gameplay of “星痕共鸣”. The project is built around a desktop GUI and provides separate piano and drum workflows, together with range adaptation, shifted-window logic, pedal handling, auto tuning, ensemble scheduling, and playback visualization.
+
+Instead of being just a loose collection of scripts, it is structured as a desktop tool that is easier to run, configure, and distribute:
+
+- graphical main window and parameter panels
+- dedicated piano and drum workspaces
+- track selection, piano-roll preview, and drum-lane preview
+- auto-tuning tools and editable config templates
+- themes, dark mode, glass-style background, and splash screen
+- packaging scripts for portable builds and installers
+
 ## Preview
 
-### Main screen (no MIDI loaded)
+### Main screen
 ![Home](docs/assets/screenshot-home-empty.png)
 
-### Piano workspace
+### Piano mode
 ![Piano](docs/assets/screenshot-piano.png)
 
-### Drum workspace
+### Drum mode
 ![Drum](docs/assets/screenshot-drum.png)
 
-### Settings dialog
+### Settings
 ![Settings](docs/assets/screenshot-settings.png)
 
 ### Splash screen
@@ -44,31 +51,43 @@ cd SayaTech-Midi-Studio
 
 ## Features
 
-- Piano MIDI auto-play
-- Drum MIDI auto-play
-- Automatic parameter tuning and suggestions
-- Short-range fixed-window logic
-- Ensemble timer with Beijing time sync
-- Configurable hotkeys
-- Multiple themes, dark mode, and glass UI
-- Optional splash screen
-- Hover tooltips and clearer parameter naming
-- Crash logs and runtime logs
+### Playback
+- piano MIDI auto-play
+- drum MIDI auto-play
+- play / pause / stop hotkeys
+- MIDI track filtering and recommendations
+- piano-roll preview, drum preview, and waveform-based navigation
+
+### Range and key mapping
+- automatic range adaptation
+- shifted window and fixed short-range window logic
+- pedal handling and retrigger controls
+- separate parameter sets for piano and drums
+- editable `config.txt` with default template
+
+### Utility features
+- ensemble timing
+- Beijing time synchronization
+- auto tuning and parameter suggestions
+- runtime logs and crash logs
+
+### UI and workflow
+- multiple visual themes
+- dark mode
+- glass-style background effect
+- optional splash screen
+- clearer parameter names and hover descriptions
 
 ## Environment
 
 - Windows 10 / 11
 - Python 3.10+
-- PySide6-based GUI environment
-- Suitable for scenarios that send keyboard input to games or windows
+- PySide6 GUI environment
+- Intended for “星痕共鸣” instrument playback scenarios that require MIDI-to-keyboard input mapping
 
-## Downloads and Releases
+## Installation and Run
 
-- Recommended installer filename for GitHub Releases: `SayaTech_MIDI_Studio_Setup.exe`
-- Portable one-file build: `SayaTech_MIDI_Studio.exe`
-- Suggested Releases page: <https://github.com/ShiroiSaya/SayaTech-Midi-Studio/releases>
-
-## Quick Start
+### Run from source
 
 ```bash
 git clone https://github.com/ShiroiSaya/SayaTech-Midi-Studio.git
@@ -77,24 +96,27 @@ pip install -r requirements.txt
 python app.py
 ```
 
+### Release naming
+
+Prebuilt binaries are not tracked in the source repository. Recommended asset names for releases:
+
+- `SayaTech_MIDI_Studio_Setup.exe` — Windows installer
+- `SayaTech_MIDI_Studio.exe` — one-file portable build
+
+Releases page: <https://github.com/ShiroiSaya/SayaTech-Midi-Studio/releases>
+
 ## Build
 
 ### One-file EXE
-You can use the included build scripts or package the app with PyInstaller directly. The output filename is `dist/SayaTech_MIDI_Studio.exe`.
+Build with the included scripts or with PyInstaller directly:
+
+- output: `dist/SayaTech_MIDI_Studio.exe`
 
 ### Installer
-Using `onedir + Inno Setup` is recommended for a faster launch experience than a single-file build. The installer output filename is fixed as `installer_output/SayaTech_MIDI_Studio_Setup.exe`.
+`onedir + Inno Setup` is the recommended packaging flow:
 
-## Highlights
-
-This project is more than a simple script pack. It provides a complete MIDI auto-play workflow:
-
-- Unified desktop UI
-- Separate piano and drum workspaces
-- Auto tuner linked with runtime parameters
-- Centralized settings panel
-- Splash screen and visual themes
-- Packaging options suitable for distribution
+- directory build: `dist/SayaTech_MIDI_Studio/`
+- installer build: `installer_output/SayaTech_MIDI_Studio_Setup.exe`
 
 ## Repository Structure
 
@@ -116,16 +138,11 @@ This project is more than a simple script pack. It provides a complete MIDI auto
 
 ## Notes
 
-- Background image and glass effects are available in light mode
-- Dark mode automatically disables the background image for better readability
-- The app prefers the tracked `config.txt` in the repository; if it is missing, it will regenerate one from the default template
-- All screenshots in this README are from a recent version of the UI
-- For Releases, it is recommended to upload `SayaTech_MIDI_Studio_Setup.exe`; prebuilt binaries are not committed to the source repository
+- Light mode supports the background image and glass-style effect
+- Dark mode disables the background image automatically for readability
+- The application reads `config.txt` first and regenerates it from the default template when missing
+- Screenshots in this README are taken from the current project UI
 
 ## License
 
-This project is released under the **MIT License**. See [LICENSE](LICENSE) for details.
-
-## Dependencies
-
-Runtime and packaging dependencies are listed in [requirements.txt](requirements.txt).
+Released under the [MIT License](LICENSE).

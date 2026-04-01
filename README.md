@@ -4,33 +4,40 @@
 
 # SayaTech-Midi-Studio
 
-**一个面向 Windows 的 MIDI 自动演奏工作室，集成钢琴 / 架子鼓演奏、自动调参、启动动画、主题与毛玻璃界面。**
+**面向《星痕共鸣》的 Windows MIDI 自动演奏工具。**  
+支持钢琴 / 架子鼓双模式、自动调参、合奏定时、主题外观与现代化桌面界面。
 
 [简体中文](README.md) · [English](README.en.md) · [日本語](README.ja.md)
+
 [![Repository](https://img.shields.io/badge/GitHub-ShiroiSaya%2FSayaTech-Midi-Studio-181717?logo=github)](https://github.com/ShiroiSaya/SayaTech-Midi-Studio)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-
-**仓库地址：** <https://github.com/ShiroiSaya/SayaTech-Midi-Studio>
-
-```bash
-git clone https://github.com/ShiroiSaya/SayaTech-Midi-Studio.git
-cd SayaTech-Midi-Studio
-```
-
 
 <img src="docs/assets/banner.png" alt="SayaTech-Midi-Studio Banner">
 
 </div>
 
+## 项目简介
+
+SayaTech-Midi-Studio 用于将 MIDI 文件转换为键盘输入，服务于《星痕共鸣》的游戏内乐器演奏场景。项目以桌面 GUI 为核心，提供钢琴与架子鼓两个工作模式，并围绕游戏演奏的实际需求加入了音域适配、右移窗口、踏板识别、自动调参、合奏定时和可视化预览等功能。
+
+它不是单纯的命令行脚本打包，而是一套更适合日常使用与分发的桌面工具：
+
+- 图形化主界面与参数面板
+- 钢琴 / 架子鼓双工作区
+- MIDI 轨道选择、卷帘预览与鼓轨预览
+- 自动调参与配置模板
+- 主题、夜间模式、毛玻璃与启动动画
+- 适合发布的打包与安装脚本
+
 ## 预览
 
-### 主界面（未载入 MIDI）
+### 主界面
 ![Home](docs/assets/screenshot-home-empty.png)
 
-### 钢琴页面
+### 钢琴模式
 ![Piano](docs/assets/screenshot-piano.png)
 
-### 架子鼓页面
+### 架子鼓模式
 ![Drum](docs/assets/screenshot-drum.png)
 
 ### 设置页面
@@ -44,31 +51,43 @@ cd SayaTech-Midi-Studio
 
 ## 功能特性
 
+### 演奏与播放
 - 钢琴 MIDI 自动演奏
 - 架子鼓 MIDI 自动演奏
+- 播放 / 暂停 / 停止热键
+- MIDI 轨道筛选与推荐
+- 钢琴卷帘预览、鼓轨实时预览与波形辅助定位
+
+### 音域与按键适配
+- 自动适配音域
+- 右移窗口与短区间固定窗口逻辑
+- 踏板识别与重触发控制
+- 钢琴、架子鼓两套独立参数
+- 默认配置模板与可编辑 `config.txt`
+
+### 合奏与工具能力
+- 合奏定时
+- 北京时间校时
 - 自动调参与参数建议
-- 短区间固定窗口逻辑
-- 合奏定时 / 北京时间校时
-- 可配置热键
-- 多主题、夜间模式、毛玻璃界面
+- 运行日志与崩溃日志
+
+### 界面体验
+- 多主题外观
+- 夜间模式
+- 毛玻璃背景效果
 - 可选启动动画
-- 配置悬停说明与更直观的参数命名
-- 崩溃日志与运行日志
+- 更直观的参数命名与悬停说明
 
 ## 适用环境
 
 - Windows 10 / 11
 - Python 3.10+
-- 适合 PySide6 图形界面环境
-- 适合需要向游戏或窗口注入键盘输入的使用场景
+- PySide6 图形界面环境
+- 适用于《星痕共鸣》内需要将 MIDI 映射为键盘输入的乐器演奏场景
 
-## 下载与 Release
+## 安装与运行
 
-- 你发布到 GitHub Releases 时，推荐上传的安装包文件名：`SayaTech_MIDI_Studio_Setup.exe`
-- 单文件便携版可使用：`SayaTech_MIDI_Studio.exe`
-- Release 页面建议地址：<https://github.com/ShiroiSaya/SayaTech-Midi-Studio/releases>
-
-## 快速开始
+### 从源码启动
 
 ```bash
 git clone https://github.com/ShiroiSaya/SayaTech-Midi-Studio.git
@@ -77,24 +96,27 @@ pip install -r requirements.txt
 python app.py
 ```
 
-## 打包
+### Release 文件约定
+
+仓库源码默认不包含已构建二进制文件。发布版本时可使用以下命名：
+
+- `SayaTech_MIDI_Studio_Setup.exe`：Windows 安装包
+- `SayaTech_MIDI_Studio.exe`：单文件便携版
+
+Release 页面：<https://github.com/ShiroiSaya/SayaTech-Midi-Studio/releases>
+
+## 构建
 
 ### 单文件 EXE
-可以使用项目内的一键打包脚本，或直接使用 PyInstaller。输出文件名为：`dist/SayaTech_MIDI_Studio.exe`
+使用项目内脚本或直接通过 PyInstaller 构建：
+
+- 输出：`dist/SayaTech_MIDI_Studio.exe`
 
 ### 安装版
-推荐使用 onedir + Inno Setup 的方式生成安装程序，启动速度会比单文件版更好。安装包输出文件名固定为：`installer_output/SayaTech_MIDI_Studio_Setup.exe`
+推荐使用 `onedir + Inno Setup` 生成安装程序：
 
-## 项目亮点
-
-这个项目不是单纯的脚本集合，而是一套完整的 MIDI 自动演奏工作流：
-
-- 图形化主界面
-- 钢琴 / 架子鼓双工作台
-- 自动调参与参数联动
-- 统一设置中心
-- 启动画面与视觉主题
-- 更适合发布和分发的打包方案
+- 目录版输出：`dist/SayaTech_MIDI_Studio/`
+- 安装包输出：`installer_output/SayaTech_MIDI_Studio_Setup.exe`
 
 ## 仓库结构
 
@@ -114,19 +136,13 @@ python app.py
 └─ LICENSE
 ```
 
-## 说明
+## 使用说明
 
-- 浅色模式下支持背景图与毛玻璃效果
-- 夜间模式会自动禁用背景图，以保证可读性和稳定性
-- 首次运行时，程序会优先读取仓库内的 `config.txt`；如果缺失，则自动按默认模板生成
-- README 中使用的界面截图均来自当前较新的版本界面
-- Release 中建议上传安装包 `SayaTech_MIDI_Studio_Setup.exe`，仓库源码中不直接包含已构建二进制文件
+- 浅色模式支持背景图与毛玻璃效果
+- 夜间模式会自动关闭背景图，以保证界面对比度与可读性
+- 程序优先读取仓库内的 `config.txt`；若缺失，会按默认模板重新生成
+- README 中的界面截图来自当前项目版本界面
 
 ## License
 
-本项目采用 **MIT License** 发布，详见仓库根目录下的 [LICENSE](LICENSE) 文件。
-
-## 依赖
-
-运行与打包依赖已整理到仓库根目录的 [requirements.txt](requirements.txt) 中。
-
+本项目基于 [MIT License](LICENSE) 发布。

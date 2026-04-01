@@ -4,33 +4,40 @@
 
 # SayaTech-Midi-Studio
 
-**Windows 向けの MIDI 自動演奏スタジオ。ピアノ / ドラム演奏、自動調整、スプラッシュ画面、テーマ、ガラス風 UI を搭載。**
+**「星痕共鸣」のゲーム内楽器演奏向け Windows 用 MIDI 自動演奏ツール。**  
+ピアノ / ドラムの 2 モード、自動調整、合奏タイマー、テーマ切替、モダンなデスクトップ UI を備えています。
 
 [简体中文](README.md) · [English](README.en.md) · [日本語](README.ja.md)
+
 [![Repository](https://img.shields.io/badge/GitHub-ShiroiSaya%2FSayaTech-Midi-Studio-181717?logo=github)](https://github.com/ShiroiSaya/SayaTech-Midi-Studio)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-
-**リポジトリ:** <https://github.com/ShiroiSaya/SayaTech-Midi-Studio>
-
-```bash
-git clone https://github.com/ShiroiSaya/SayaTech-Midi-Studio.git
-cd SayaTech-Midi-Studio
-```
-
 
 <img src="docs/assets/banner.png" alt="SayaTech-Midi-Studio Banner">
 
 </div>
 
+## 概要
+
+SayaTech-Midi-Studio は、MIDI ファイルをキーボード入力へ変換し、「星痕共鸣」のゲーム内楽器演奏に利用するためのデスクトップツールです。GUI を中心に構成されており、ピアノとドラムの独立したワークフローに加えて、音域適応、右シフトウィンドウ、ペダル処理、自動調整、合奏時刻指定、再生プレビューなどを備えています。
+
+単なるスクリプト集ではなく、実際に使いやすく、配布しやすい構成を意識したデスクトップアプリとして整理されています。
+
+- グラフィカルなメイン画面と設定パネル
+- ピアノ / ドラムの独立ワークスペース
+- トラック選択、ピアノロール、ドラムレーンのプレビュー
+- 自動調整機能と編集可能な設定テンプレート
+- テーマ、ダークモード、ガラス風背景、スプラッシュ画面
+- 配布向けのビルド / インストーラースクリプト
+
 ## プレビュー
 
-### メイン画面（MIDI 未読込）
+### メイン画面
 ![Home](docs/assets/screenshot-home-empty.png)
 
-### ピアノ画面
+### ピアノモード
 ![Piano](docs/assets/screenshot-piano.png)
 
-### ドラム画面
+### ドラムモード
 ![Drum](docs/assets/screenshot-drum.png)
 
 ### 設定画面
@@ -44,31 +51,43 @@ cd SayaTech-Midi-Studio
 
 ## 主な機能
 
+### 再生機能
 - ピアノ MIDI 自動演奏
 - ドラム MIDI 自動演奏
-- 自動チューニングとパラメータ提案
-- 短音域向け固定ウィンドウロジック
-- 北京時間同期付きの合奏タイマー
-- ホットキーのカスタマイズ
-- 複数テーマ、ダークモード、ガラス風 UI
-- オプションのスプラッシュ画面
-- ホバー説明と分かりやすいパラメータ名
-- クラッシュログと実行ログ
+- 再生 / 一時停止 / 停止ホットキー
+- MIDI トラックの絞り込みと推奨選択
+- ピアノロール、ドラムプレビュー、波形による位置確認
+
+### 音域・キー適応
+- 自動音域適応
+- 右シフトウィンドウと短音域固定ウィンドウ
+- ペダル処理と再トリガー制御
+- ピアノ / ドラム別の独立パラメータ
+- 既定テンプレート付きの `config.txt`
+
+### 補助機能
+- 合奏タイマー
+- 北京時間との時刻同期
+- 自動調整とパラメータ提案
+- 実行ログとクラッシュログ
+
+### UI と操作性
+- 複数テーマ
+- ダークモード
+- ガラス風背景効果
+- 任意のスプラッシュ画面
+- 分かりやすいパラメータ名とホバー説明
 
 ## 動作環境
 
 - Windows 10 / 11
 - Python 3.10+
 - PySide6 ベースの GUI 環境
-- ゲームやウィンドウへキーボード入力を送る用途に適しています
+- 「星痕共鸣」で MIDI をキーボード入力へ変換して演奏する用途を想定
 
-## ダウンロードと Release
+## インストールと実行
 
-- GitHub Releases に掲載する推奨インストーラー名: `SayaTech_MIDI_Studio_Setup.exe`
-- 単体実行版のファイル名: `SayaTech_MIDI_Studio.exe`
-- 推奨 Release ページ: <https://github.com/ShiroiSaya/SayaTech-Midi-Studio/releases>
-
-## クイックスタート
+### ソースから起動
 
 ```bash
 git clone https://github.com/ShiroiSaya/SayaTech-Midi-Studio.git
@@ -77,24 +96,27 @@ pip install -r requirements.txt
 python app.py
 ```
 
+### Release 名称
+
+ソースリポジトリにはビルド済みバイナリを含めていません。Release 用の推奨ファイル名は以下です。
+
+- `SayaTech_MIDI_Studio_Setup.exe`：Windows インストーラー
+- `SayaTech_MIDI_Studio.exe`：単体実行版
+
+Release ページ：<https://github.com/ShiroiSaya/SayaTech-Midi-Studio/releases>
+
 ## ビルド
 
 ### 単一 EXE
-同梱のビルドスクリプト、または PyInstaller でパッケージ化できます。出力ファイル名は `dist/SayaTech_MIDI_Studio.exe` です。
+付属スクリプト、または PyInstaller でビルドできます。
 
-### インストーラー版
-起動速度を優先する場合は、`onedir + Inno Setup` の構成がおすすめです。インストーラーの出力ファイル名は `installer_output/SayaTech_MIDI_Studio_Setup.exe` に固定されています。
+- 出力：`dist/SayaTech_MIDI_Studio.exe`
 
-## ハイライト
+### インストーラー
+推奨構成は `onedir + Inno Setup` です。
 
-このプロジェクトは単なるスクリプト集ではなく、MIDI 自動演奏のための一連のワークフローを提供します。
-
-- 統一されたデスクトップ UI
-- ピアノ / ドラムの独立ワークスペース
-- 実行時パラメータと連動する自動チューナー
-- 一元化された設定画面
-- スプラッシュ画面とテーマ切替
-- 配布向けのパッケージング手段
+- ディレクトリ版：`dist/SayaTech_MIDI_Studio/`
+- インストーラー版：`installer_output/SayaTech_MIDI_Studio_Setup.exe`
 
 ## リポジトリ構成
 
@@ -116,16 +138,11 @@ python app.py
 
 ## 補足
 
-- ライトモードでは背景画像とガラス効果が使えます
-- ダークモードでは可読性のため背景画像を自動で無効化します
-- 初回起動時はリポジトリ内の `config.txt` を優先して読み込み、存在しない場合は既定テンプレートから再生成します
-- README のスクリーンショットは最近の UI バージョンから取得しています
-- Release には `SayaTech_MIDI_Studio_Setup.exe` をアップロードする構成を想定しており、ビルド済みバイナリはソースリポジトリに含めません
+- ライトモードでは背景画像とガラス風効果が利用できます
+- ダークモードでは視認性のため背景画像を自動で無効化します
+- `config.txt` が存在しない場合は既定テンプレートから再生成されます
+- README のスクリーンショットは現行プロジェクト UI のものです
 
 ## License
 
-このプロジェクトは **MIT License** で公開されています。詳細は [LICENSE](LICENSE) をご確認ください。
-
-## Dependencies
-
-実行時とパッケージング時の依存関係は [requirements.txt](requirements.txt) にまとめてあります。
+本プロジェクトは [MIT License](LICENSE) のもとで公開されています。
