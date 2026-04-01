@@ -959,6 +959,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(drum_card, 2)
 
         drum_timeline_card = Card()
+        self.drum_timeline_card = drum_timeline_card
         drum_timeline_layout = QVBoxLayout(drum_timeline_card)
         drum_timeline_layout.setContentsMargins(14, 10, 14, 10)
         drum_timeline_layout.setSpacing(6)
@@ -1090,8 +1091,11 @@ class MainWindow(QMainWindow):
         self.drum_preview_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.drum_preview_tree.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.drum_preview_tree.header().setSectionResizeMode(3, QHeaderView.Stretch)
-        preview_layout.addWidget(self.drum_preview_tree)
-        side_layout.addWidget(preview_card, 1)
+        preview_card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.drum_preview_card = preview_card
+        self.drum_preview_tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        preview_layout.addWidget(self.drum_preview_tree, 1)
+        side_layout.addWidget(preview_card)
         side_layout.addStretch(1)
 
         side_scroll.setWidget(side)
@@ -1100,7 +1104,23 @@ class MainWindow(QMainWindow):
         content_split.setStretchFactor(1, 3)
         content_split.setSizes([980, 440])
         layout.addWidget(content_split, 1)
+        QTimer.singleShot(0, self._sync_drum_preview_height)
         return page
+
+    def _sync_drum_preview_height(self) -> None:
+        if not hasattr(self, 'drum_preview_card') or not hasattr(self, 'drum_timeline_card'):
+            return
+        timeline_card = self.drum_timeline_card
+        preview_card = self.drum_preview_card
+        tree = self.drum_preview_tree
+        target_h = timeline_card.height()
+        if target_h <= 0:
+            target_h = timeline_card.sizeHint().height()
+        target_h = max(260, target_h)
+        preview_card.setFixedHeight(target_h)
+        header_h = tree.header().height() if tree.header() is not None else 26
+        preview_tree_h = max(180, target_h - 44 - header_h)
+        tree.setMinimumHeight(preview_tree_h)
 
     def _create_drum_param_widget(self, key: str, kind: str) -> QWidget:
         value = self.runtime_config.get(key)
@@ -1456,6 +1476,7 @@ class MainWindow(QMainWindow):
             self.piano_splitter.setSizes([int(290 * scale), int(185 * scale)])
         if hasattr(self, 'drum_content_split'):
             self.drum_content_split.setSizes([max(900, int(980 * scale)), max(420, int(460 * scale))])
+            QTimer.singleShot(0, self._sync_drum_preview_height)
         if hasattr(self, 'left_sidebar'):
             self.left_sidebar.setMinimumWidth(int(310 * scale))
         if hasattr(self, 'right_sidebar'):
