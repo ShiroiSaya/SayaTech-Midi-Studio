@@ -1,0 +1,2 @@
+Repository Name: SayaTech-Midi-Studio
+Repository URL: https://github.com/ShiroiSaya/SayaTech-Midi-Studio
