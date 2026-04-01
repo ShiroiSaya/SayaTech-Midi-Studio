@@ -1,74 +1,75 @@
-<div align="center">
+<p align="center">
+  <img src="docs/assets/logo.png" alt="SayaTech-Midi-Studio Logo" width="120" />
+</p>
 
-<img src="docs/assets/logo.png" width="128" alt="SayaTech-Midi-Studio Logo">
+<h1 align="center">SayaTech-Midi-Studio</h1>
 
-# SayaTech-Midi-Studio
+<p align="center">
+  面向《星痕共鸣》的 Windows MIDI 自动演奏工具
+</p>
 
-**面向《星痕共鸣》的 Windows MIDI 自动演奏工具。**  
-支持钢琴 / 架子鼓双模式、自动调参、合奏定时、主题外观与现代化桌面界面。
+<p align="center">
+  <a href="README.md">简体中文</a> ·
+  <a href="README.en.md">English</a> ·
+  <a href="README.ja.md">日本語</a>
+</p>
 
-[简体中文](README.md) · [English](README.en.md) · [日本語](README.ja.md)
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-4c8bf5" alt="Platform" />
+  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB" alt="Python" />
+  <img src="https://img.shields.io/badge/License-MIT-111111" alt="License" />
+</p>
 
-[![Repository](https://img.shields.io/badge/GitHub-ShiroiSaya%2FSayaTech-Midi-Studio-181717?logo=github)](https://github.com/ShiroiSaya/SayaTech-Midi-Studio)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-
-<img src="docs/assets/banner.png" alt="SayaTech-Midi-Studio Banner">
-
-</div>
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="SayaTech-Midi-Studio Banner" />
+</p>
 
 ## 项目简介
 
-SayaTech-Midi-Studio 用于将 MIDI 文件转换为键盘输入，服务于《星痕共鸣》的游戏内乐器演奏场景。项目以桌面 GUI 为核心，提供钢琴与架子鼓两个工作模式，并围绕游戏演奏的实际需求加入了音域适配、右移窗口、踏板识别、自动调参、合奏定时和可视化预览等功能。
+SayaTech-Midi-Studio 用于将 MIDI 文件转换为键盘输入，服务于《星痕共鸣》的游戏内乐器演奏场景。项目以桌面 GUI 为核心，提供两类工作台：
 
-它不是单纯的命令行脚本打包，而是一套更适合日常使用与分发的桌面工具：
+- **钢琴 / 吉他 / 贝斯**
+- **架子鼓**
 
-- 图形化主界面与参数面板
-- 钢琴 / 架子鼓双工作区
-- MIDI 轨道选择、卷帘预览与鼓轨预览
-- 自动调参与配置模板
-- 主题、夜间模式、毛玻璃与启动动画
-- 适合发布的打包与安装脚本
+它不是单纯的脚本打包，而是一套更适合日常使用、调参、测试与分发的桌面工具。围绕游戏内演奏的实际需求，项目集成了轨道筛选、可视化预览、区间移动、踏板识别、自动调参、合奏定时与现代化界面。
 
 ## 预览
 
 ### 主界面
-![Home](docs/assets/screenshot-home-empty.png)
+![Home](docs/assets/home.png)
 
-### 钢琴模式
-![Piano](docs/assets/screenshot-piano.png)
+### 钢琴 / 吉他 / 贝斯
+![Piano](docs/assets/piano.png)
 
-### 架子鼓模式
-![Drum](docs/assets/screenshot-drum.png)
+### 架子鼓
+![Drum](docs/assets/drum.png)
 
-### 设置页面
-![Settings](docs/assets/screenshot-settings.png)
-
-### 启动画面
-![Splash](docs/assets/screenshot-splash.png)
+### 设置
+![Settings](docs/assets/settings.png)
 
 ### 夜间模式
-![Dark Mode](docs/assets/screenshot-dark.png)
+![Dark Mode](docs/assets/dark.png)
 
 ## 功能特性
 
 ### 演奏与播放
-- 钢琴 MIDI 自动演奏
+- 钢琴 / 吉他 / 贝斯 MIDI 自动演奏
 - 架子鼓 MIDI 自动演奏
 - 播放 / 暂停 / 停止热键
 - MIDI 轨道筛选与推荐
-- 钢琴卷帘预览、鼓轨实时预览与波形辅助定位
+- 钢琴卷帘预览、鼓轨实时预览、时间轴拖动跳转
 
-### 音域与按键适配
-- 自动适配音域
-- 右移窗口与短区间固定窗口逻辑
+### 音域与映射
+- 自动适配可弹音域
+- 区间移动逻辑
 - 踏板识别与重触发控制
-- 钢琴、架子鼓两套独立参数
-- 默认配置模板与可编辑 `config.txt`
+- 钢琴 / 吉他 / 贝斯与架子鼓独立参数
+- 可编辑 `config.txt` 与默认配置模板
 
-### 合奏与工具能力
+### 自动调参与工具能力
+- 自动调参与参数建议
 - 合奏定时
 - 北京时间校时
-- 自动调参与参数建议
 - 运行日志与崩溃日志
 
 ### 界面体验
@@ -96,9 +97,9 @@ pip install -r requirements.txt
 python app.py
 ```
 
-### Release 文件约定
+### Release 文件命名
 
-仓库源码默认不包含已构建二进制文件。发布版本时可使用以下命名：
+仓库源码默认不包含已构建二进制文件。发布版本建议使用以下名称：
 
 - `SayaTech_MIDI_Studio_Setup.exe`：Windows 安装包
 - `SayaTech_MIDI_Studio.exe`：单文件便携版
@@ -140,9 +141,9 @@ Release 页面：<https://github.com/ShiroiSaya/SayaTech-Midi-Studio/releases>
 
 - 浅色模式支持背景图与毛玻璃效果
 - 夜间模式会自动关闭背景图，以保证界面对比度与可读性
-- 程序优先读取仓库内的 `config.txt`；若缺失，会按默认模板重新生成
-- README 中的界面截图来自当前项目版本界面
+- 架子鼓参数页与钢琴 / 吉他 / 贝斯参数页相互独立
+- 自动调参生成的建议，适合先回填再试听，不建议盲目一次性覆盖全部习惯参数
 
-## License
+## 许可协议
 
-本项目基于 [MIT License](LICENSE) 发布。
+本项目采用 [MIT License](LICENSE)。
