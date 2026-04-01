@@ -265,7 +265,7 @@ class PianoRollWidget(QWidget):
             painter.drawLine(x, 0, x, self.height())
         if not self.notes or self.duration_sec <= 0:
             painter.setPen(text_color)
-            painter.drawText(self.rect(), Qt.AlignCenter, "选择 MIDI 后，这里显示钢琴卷帘预览")
+            painter.drawText(self.rect(), Qt.AlignCenter, "选择 MIDI 后，这里显示钢琴 / 吉他 / 贝斯卷帘预览")
             return
         note_span = max(1, self.view_max_note - self.view_min_note)
         palette = [QColor("#66C2A5"), QColor("#8DA0CB"), QColor("#FC8D62"), QColor("#E78AC3")] if not dark else [QColor("#34d399"), QColor("#818cf8"), QColor("#fb923c"), QColor("#f472b6")]
@@ -649,11 +649,6 @@ class MainWindow(QMainWindow):
         self.current_mode = "piano"
         self.selected_piano_tracks: set[int] = set()
         self.selected_drum_tracks: set[int] = set()
-        self._filtered_analysis_cache: Dict[tuple, MidiAnalysisResult] = {}
-        self._transport_analysis_signature: Optional[tuple] = None
-        self._drum_report_cache_key: Optional[tuple] = None
-        self._drum_report_cache_value = None
-        self._last_loaded_pedal_threshold = int(self.runtime_config.get("PEDAL_ON_VALUE", 64))
         self._hotkey_last_trigger: Dict[str, float] = {"play": 0.0, "pause": 0.0, "stop": 0.0}
         self._global_hotkey_state: Dict[int, bool] = {}
         self._last_applied_stylesheet = ""
@@ -763,7 +758,7 @@ class MainWindow(QMainWindow):
         self.nav_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.nav_list.setMinimumHeight(286)
-        for text, mode in [("钢琴", "piano"), ("参数配置", "config"), ("自动调参", "tuner"), ("架子鼓", "drum")]:
+        for text, mode in [("钢琴 / 吉他 / 贝斯", "piano"), ("架子鼓", "drum"), ("参数配置", "config"), ("自动调参", "tuner")]:
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, mode)
             self.nav_list.addItem(item)
@@ -848,7 +843,7 @@ class MainWindow(QMainWindow):
 
         top_cards = QHBoxLayout()
         top_cards.setSpacing(10)
-        self.piano_mode_card = self._build_status_card("当前模式", "钢琴")
+        self.piano_mode_card = self._build_status_card("当前模式", "钢琴 / 吉他 / 贝斯")
         self.piano_bpm_card = self._build_status_card("当前 MIDI BPM", "-", "未载入")
         self.piano_state_card = self._build_status_card("播放状态", "stopped", "等待播放")
         for c in [self.piano_mode_card, self.piano_bpm_card, self.piano_state_card]:
@@ -865,7 +860,7 @@ class MainWindow(QMainWindow):
         preview_layout.setSpacing(6)
         preview_layout.setAlignment(Qt.AlignTop)
         title_row = QHBoxLayout()
-        title = QLabel("钢琴 MIDI 实时预览")
+        title = QLabel("钢琴 / 吉他 / 贝斯 MIDI 实时预览")
         title.setProperty("sectionTitle", True)
         title_row.addWidget(title)
         title_row.addStretch(1)
@@ -959,7 +954,6 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(drum_card, 2)
 
         drum_timeline_card = Card()
-        self.drum_timeline_card = drum_timeline_card
         drum_timeline_layout = QVBoxLayout(drum_timeline_card)
         drum_timeline_layout.setContentsMargins(14, 10, 14, 10)
         drum_timeline_layout.setSpacing(6)
@@ -1091,11 +1085,8 @@ class MainWindow(QMainWindow):
         self.drum_preview_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.drum_preview_tree.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.drum_preview_tree.header().setSectionResizeMode(3, QHeaderView.Stretch)
-        preview_card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.drum_preview_card = preview_card
-        self.drum_preview_tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        preview_layout.addWidget(self.drum_preview_tree, 1)
-        side_layout.addWidget(preview_card)
+        preview_layout.addWidget(self.drum_preview_tree)
+        side_layout.addWidget(preview_card, 1)
         side_layout.addStretch(1)
 
         side_scroll.setWidget(side)
@@ -1104,23 +1095,7 @@ class MainWindow(QMainWindow):
         content_split.setStretchFactor(1, 3)
         content_split.setSizes([980, 440])
         layout.addWidget(content_split, 1)
-        QTimer.singleShot(0, self._sync_drum_preview_height)
         return page
-
-    def _sync_drum_preview_height(self) -> None:
-        if not hasattr(self, 'drum_preview_card') or not hasattr(self, 'drum_timeline_card'):
-            return
-        timeline_card = self.drum_timeline_card
-        preview_card = self.drum_preview_card
-        tree = self.drum_preview_tree
-        target_h = timeline_card.height()
-        if target_h <= 0:
-            target_h = timeline_card.sizeHint().height()
-        target_h = max(260, target_h)
-        preview_card.setFixedHeight(target_h)
-        header_h = tree.header().height() if tree.header() is not None else 26
-        preview_tree_h = max(180, target_h - 44 - header_h)
-        tree.setMinimumHeight(preview_tree_h)
 
     def _create_drum_param_widget(self, key: str, kind: str) -> QWidget:
         value = self.runtime_config.get(key)
@@ -1316,7 +1291,7 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(btn_row)
         self.tuner_output = QPlainTextEdit()
         self.tuner_output.setReadOnly(True)
-        self.tuner_output.setPlainText("载入 MIDI，并输入你实际可弹奏的音域后，这里会给出建议参数。")
+        self.tuner_output.setPlainText("载入 MIDI，并输入你实际可弹奏的音域后，这里会给出钢琴 / 吉他 / 贝斯通用建议参数。")
         left_layout.addWidget(self.tuner_output, 1)
         layout.addWidget(left, 1)
 
@@ -1331,7 +1306,7 @@ class MainWindow(QMainWindow):
             "生成建议后，这里会预览主要写入项：\n\n"
             "- LEFTMOST_NOTE / VISIBLE_OCTAVES\n"
             "- UNLOCKED_MIN_NOTE / UNLOCKED_MAX_NOTE\n"
-            "- AUTO_TRANSPOSE / USE_PEDAL\n"
+            "- AUTO_TRANSPOSE / AUTO_SHIFT_FROM_RANGE / USE_PEDAL\n"
             "- RETRIGGER_* / CHORD_* / OCTAVE_FOLD_*\n"
             "- BAR_AWARE_* / MELODY_* / SHIFT_HOLD_*"
         )
@@ -1476,7 +1451,6 @@ class MainWindow(QMainWindow):
             self.piano_splitter.setSizes([int(290 * scale), int(185 * scale)])
         if hasattr(self, 'drum_content_split'):
             self.drum_content_split.setSizes([max(900, int(980 * scale)), max(420, int(460 * scale))])
-            QTimer.singleShot(0, self._sync_drum_preview_height)
         if hasattr(self, 'left_sidebar'):
             self.left_sidebar.setMinimumWidth(int(310 * scale))
         if hasattr(self, 'right_sidebar'):
@@ -1632,19 +1606,6 @@ class MainWindow(QMainWindow):
         mode_text = current.text() if current else mode
         self._finish_switch_mode(mode_text)
 
-    def _switch_mode_programmatically(self, mode: str) -> None:
-        mapping = {"piano": 0, "config": 1, "tuner": 2, "drum": 3}
-        row = mapping.get(mode, 0)
-        self.nav_list.blockSignals(True)
-        self.nav_list.setCurrentRow(row)
-        self.nav_list.blockSignals(False)
-        self.current_mode = mode
-        if hasattr(self, 'pages'):
-            self.pages.fade_to_index(row)
-        current = self.nav_list.item(row)
-        mode_text = current.text() if current else mode
-        self._finish_switch_mode(mode_text)
-
     def _finish_switch_mode(self, mode_text: str) -> None:
         self._populate_track_tree(self._mode_tracks())
         self._refresh_transport_for_mode()
@@ -1653,7 +1614,7 @@ class MainWindow(QMainWindow):
 
     def _sync_mode_cards(self) -> None:
         state = self.transport.state.value if hasattr(self.transport.state, 'value') else str(self.transport.state)
-        self._set_status_card(self.piano_mode_card, "当前模式", "钢琴")
+        self._set_status_card(self.piano_mode_card, "当前模式", "钢琴 / 吉他 / 贝斯")
         self._set_status_card(self.drum_mode_card, "当前模式", "架子鼓")
         pretty, hint = self._display_state_meta(state)
         self._set_status_card(self.piano_state_card, "播放状态", pretty, hint)
@@ -1684,18 +1645,12 @@ class MainWindow(QMainWindow):
 
     def _load_midi(self, path: str) -> None:
         try:
-            pedal_threshold = int(self.runtime_config.get("PEDAL_ON_VALUE", 64))
-            analysis = analyze_midi(path, pedal_threshold=pedal_threshold)
+            analysis = analyze_midi(path, pedal_threshold=int(self.runtime_config.get("PEDAL_ON_VALUE", 64)))
         except Exception as exc:
             QMessageBox.critical(self, "MIDI 读取失败", str(exc))
             self._log(f"读取失败：{exc}")
             return
         self.current_analysis = analysis
-        self._filtered_analysis_cache.clear()
-        self._transport_analysis_signature = None
-        self._drum_report_cache_key = None
-        self._drum_report_cache_value = None
-        self._last_loaded_pedal_threshold = pedal_threshold
         self.selected_piano_tracks = set(analysis.recommended_track_indexes)
         self.selected_drum_tracks = set(analysis.recommended_drum_indexes)
         self._populate_track_tree(self._mode_tracks())
@@ -1705,7 +1660,7 @@ class MainWindow(QMainWindow):
         self._set_status_card(self.drum_bpm_card, "当前 MIDI BPM", bpm_text, os.path.basename(path))
         self.summary_label.setText(
             f"{os.path.basename(path)}\n总时长 {analysis.duration_sec:.2f}s\n"
-            f"可见音符 {len(analysis.notes)}\n钢琴推荐 {len(analysis.recommended_track_indexes)} 轨 / 鼓推荐 {len(analysis.recommended_drum_indexes)} 轨"
+            f"可见音符 {len(analysis.notes)}\n钢琴 / 吉他 / 贝斯推荐 {len(analysis.recommended_track_indexes)} 轨 / 鼓推荐 {len(analysis.recommended_drum_indexes)} 轨"
         )
         self._log(f"已分析 MIDI：{os.path.basename(path)}")
 
@@ -1762,56 +1717,26 @@ class MainWindow(QMainWindow):
         selected = self._selected_track_set_for_mode()
         if not selected:
             selected = self._recommended_track_set_for_mode()
-        selected_key = tuple(sorted(int(x) for x in selected))
-        if not selected_key:
-            return self.current_analysis
-        cache_key = (self.current_mode, id(self.current_analysis), selected_key)
-        cached = self._filtered_analysis_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        filtered = filter_analysis(self.current_analysis, selected_key)
-        self._filtered_analysis_cache[cache_key] = filtered
-        return filtered
+        if selected:
+            return filter_analysis(self.current_analysis, selected)
+        return self.current_analysis
 
     def _refresh_transport_for_mode(self) -> None:
         self._apply_runtime_config_to_backends()
         self.transport.set_backend(self.drum_backend if self.current_mode == "drum" else self.piano_backend)
         analysis = self._analysis_for_current_mode()
-        selected_now = self._selected_track_set_for_mode() or self._recommended_track_set_for_mode()
-        analysis_signature = None if analysis is None else (self.current_mode, id(self.current_analysis), tuple(sorted(int(x) for x in selected_now)))
         if analysis is not None:
-            if analysis_signature != self._transport_analysis_signature:
-                self.transport.set_analysis(analysis)
-                self._transport_analysis_signature = analysis_signature
+            self.transport.set_analysis(analysis)
             if self.current_mode == "piano":
                 lo = getattr(self.piano_roll, "view_min_note", analysis.min_note)
                 hi = getattr(self.piano_roll, "view_max_note", analysis.max_note)
                 self.piano_range_label.setText(f"{midi_to_note_name(lo)} ~ {midi_to_note_name(hi)}")
             else:
-                self.drum_hint_label.setText(f"已选 {len(selected_now)} 轨")
-        else:
-            self._transport_analysis_signature = None
+                self.drum_hint_label.setText(f"已选 {len(self._selected_track_set_for_mode() or self._recommended_track_set_for_mode())} 轨")
         if self.current_analysis is not None:
-            drum_selected = tuple(sorted(self.selected_drum_tracks or set(self.current_analysis.recommended_drum_indexes)))
-            drum_key = (
-                id(self.current_analysis),
-                drum_selected,
-                round(float(self.drum_backend.same_time_window), 4),
-                round(float(self.drum_backend.coarse_group_window), 4),
-                round(float(self.drum_backend.density_limit_hz), 4),
-                int(self.drum_backend.max_simultaneous),
-                bool(self.drum_backend.use_context_replace),
-                bool(self.drum_backend.use_velocity_rules),
-                bool(self.drum_backend.use_smart_keep),
-                bool(self.drum_backend.prefer_channel_10),
-            )
-            if drum_key != self._drum_report_cache_key:
-                self._drum_report_cache_key = drum_key
-                self._drum_report_cache_value = filter_analysis(self.current_analysis, drum_selected)
-            self._refresh_drum_report(self._drum_report_cache_value)
+            drum_selected = self.selected_drum_tracks or set(self.current_analysis.recommended_drum_indexes)
+            self._refresh_drum_report(filter_analysis(self.current_analysis, drum_selected))
         else:
-            self._drum_report_cache_key = None
-            self._drum_report_cache_value = None
             self._refresh_drum_report(None)
 
     def _apply_analysis_to_widgets(self, analysis: MidiAnalysisResult) -> None:
@@ -1890,16 +1815,12 @@ class MainWindow(QMainWindow):
     def _load_drum_config_widgets(self) -> None:
         for key, widget in self.drum_param_widgets.items():
             value = self.runtime_config.get(key)
-            widget.blockSignals(True)
-            try:
-                if isinstance(widget, QCheckBox):
-                    widget.setChecked(bool(value))
-                elif isinstance(widget, QSpinBox):
-                    widget.setValue(int(value))
-                elif isinstance(widget, QDoubleSpinBox):
-                    widget.setValue(float(value))
-            finally:
-                widget.blockSignals(False)
+            if isinstance(widget, QCheckBox):
+                widget.setChecked(bool(value))
+            elif isinstance(widget, QSpinBox):
+                widget.setValue(int(value))
+            elif isinstance(widget, QDoubleSpinBox):
+                widget.setValue(float(value))
 
     def _collect_drum_config_from_panel(self) -> Dict[str, object]:
         config = dict(self.runtime_config)
@@ -1956,38 +1877,29 @@ class MainWindow(QMainWindow):
             self.drum_preview_tree.addTopLevelItem(QTreeWidgetItem([note_name, str(count), mapped_name, remark]))
 
     def _load_config_into_form(self) -> None:
-        self.setUpdatesEnabled(False)
-        try:
-            for spec in SUPPORTED_FIELDS:
-                widget = self.config_widgets.get(spec.key)
-                if widget is None:
-                    continue
-                value = self.runtime_config.get(spec.key)
-                widget.blockSignals(True)
-                try:
-                    if isinstance(widget, QCheckBox):
-                        widget.setChecked(bool(value))
-                    elif isinstance(widget, QComboBox):
-                        index = widget.findText(str(value))
-                        if index >= 0:
-                            widget.setCurrentIndex(index)
-                    elif isinstance(widget, QSpinBox):
-                        widget.setValue(int(value))
-                    elif isinstance(widget, QDoubleSpinBox):
-                        widget.setValue(float(value))
-                    elif isinstance(widget, QLineEdit):
-                        if spec.kind == "note":
-                            widget.setText(cfg_midi_to_note_name(int(value)))
-                        elif spec.key == "KEYMAP" and isinstance(value, list):
-                            widget.setText(",".join(value))
-                        else:
-                            widget.setText(str(value))
-                finally:
-                    widget.blockSignals(False)
-            self._load_drum_config_widgets()
-        finally:
-            self.setUpdatesEnabled(True)
-            self.update()
+        for spec in SUPPORTED_FIELDS:
+            widget = self.config_widgets.get(spec.key)
+            if widget is None:
+                continue
+            value = self.runtime_config.get(spec.key)
+            if isinstance(widget, QCheckBox):
+                widget.setChecked(bool(value))
+            elif isinstance(widget, QComboBox):
+                index = widget.findText(str(value))
+                if index >= 0:
+                    widget.setCurrentIndex(index)
+            elif isinstance(widget, QSpinBox):
+                widget.setValue(int(value))
+            elif isinstance(widget, QDoubleSpinBox):
+                widget.setValue(float(value))
+            elif isinstance(widget, QLineEdit):
+                if spec.kind == "note":
+                    widget.setText(cfg_midi_to_note_name(int(value)))
+                elif spec.key == "KEYMAP" and isinstance(value, list):
+                    widget.setText(",".join(value))
+                else:
+                    widget.setText(str(value))
+        self._load_drum_config_widgets()
 
     def _collect_config_from_form(self) -> Dict[str, object]:
         config = dict(self.runtime_config)
@@ -2016,16 +1928,13 @@ class MainWindow(QMainWindow):
 
     def _apply_config_from_form(self) -> None:
         try:
-            new_config = self._collect_config_from_form()
+            self.runtime_config = self._collect_config_from_form()
         except Exception as exc:
             QMessageBox.critical(self, "参数解析失败", str(exc))
             return
-        old_pedal = int(self.runtime_config.get("PEDAL_ON_VALUE", 64))
-        self.runtime_config = new_config
         self._apply_runtime_config_to_backends()
-        midi_path = self.file_path_edit.text().strip()
-        if self.current_analysis and midi_path and int(self.runtime_config.get("PEDAL_ON_VALUE", 64)) != old_pedal:
-            self._load_midi(midi_path)
+        if self.current_analysis and self.file_path_edit.text().strip():
+            self._load_midi(self.file_path_edit.text().strip())
         else:
             self._refresh_transport_for_mode()
         self._log("已应用当前配置到运行中。")
@@ -2109,8 +2018,10 @@ class MainWindow(QMainWindow):
         if "UNLOCKED_MAX_NOTE" in self.tuner_suggestions:
             self.tuner_max_note_edit.setText(cfg_midi_to_note_name(int(self.tuner_suggestions["UNLOCKED_MAX_NOTE"])))
         self._load_config_into_form()
-        self._switch_mode_programmatically("config")
-        self._log("已将自动调参建议回填到配置页，尚未应用到当前运行。")
+        self.pages.setCurrentIndex(1)
+        self.current_mode = "config"
+        self._apply_runtime_config_to_backends()
+        self._log("已将自动调参建议回填到配置页。")
 
     def _set_ensemble_target(self, dt: datetime) -> None:
         self.ensemble_target = dt.replace(microsecond=0)
@@ -2244,7 +2155,7 @@ class MainWindow(QMainWindow):
             "启动播放线程",
             "请求停止旧播放线程",
             "旧播放线程已退出",
-            "钢琴播放线程结束",
+            "钢琴/吉他/贝斯播放线程结束",
             "鼓播放线程结束",
             "已切换工作台",
             "已装载时间轴",
