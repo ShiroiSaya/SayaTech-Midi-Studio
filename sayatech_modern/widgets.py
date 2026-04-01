@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .theme import _palette
+
 
 def _animations_enabled() -> bool:
     app = QApplication.instance()
@@ -90,6 +92,20 @@ class AnimatedSwitch(QCheckBox):
 
     offset = Property(float, _get_offset, _set_offset)
 
+    def _target_offset(self) -> float:
+        return 1.0 if self.isChecked() else 0.0
+
+    def _sync_offset_immediately(self) -> None:
+        self._anim.stop()
+        self._set_offset(self._target_offset())
+
+    def setChecked(self, checked: bool) -> None:
+        checked = bool(checked)
+        before = self.isChecked()
+        super().setChecked(checked)
+        if self.signalsBlocked() or before == self.isChecked():
+            self._sync_offset_immediately()
+
     def _start_transition(self, checked: bool) -> None:
         end = 1.0 if bool(checked) else 0.0
         if not _animations_enabled():
@@ -106,17 +122,27 @@ class AnimatedSwitch(QCheckBox):
     def hitButton(self, pos):
         return self.contentsRect().contains(pos)
 
+    def _resolve_colors(self) -> tuple[QColor, QColor, QColor, QColor]:
+        app = QApplication.instance()
+        is_dark = bool(app.property("uiDarkMode")) if app else False
+        preset = str(app.property("uiThemePreset") or "ocean") if app else "ocean"
+        palette = _palette(is_dark, preset)
+        text_color = QColor(palette["text"])
+        off_track = QColor(palette["track"])
+        on_track = QColor(palette["accent"])
+        border = QColor(palette["border"])
+        thumb = QColor("#f8fafc") if is_dark else QColor("#ffffff")
+        return text_color, off_track, on_track, thumb, border
+
     def paintEvent(self, event):
         _ = event
+        if not self._anim.state() and abs(self._offset - self._target_offset()) > 0.001:
+            self._offset = self._target_offset()
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        is_dark = bool(QApplication.instance().property("uiDarkMode")) if QApplication.instance() else False
-        text_color = QColor("#e5e7eb") if is_dark else QColor("#0f172a")
-        off_track = QColor("#334155") if is_dark else QColor("#cbd5e1")
-        on_track = QColor("#60a5fa") if is_dark else QColor("#2563eb")
-        thumb = QColor("#f8fafc") if is_dark else QColor("#ffffff")
-        border = QColor("#475569") if is_dark else QColor("#cbd5e1")
+        text_color, off_track, on_track, thumb, border = self._resolve_colors()
 
         rect = self.contentsRect()
         track_w = 42
