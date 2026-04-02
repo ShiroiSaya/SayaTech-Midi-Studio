@@ -23,6 +23,8 @@ class UISettings:
     glass_blur: int = 58
     splash_enabled: bool = True
     splash_duration_ms: int = 3000
+    gpu_acceleration: bool = False
+    performance_mode: bool = False
 
 
 THEMES = {"ocean", "violet", "emerald", "sunset", "graphite"}
@@ -51,6 +53,8 @@ def _normalize(data: Dict[str, Any]) -> UISettings:
         "animations_enabled",
         "debug_mode",
         "splash_enabled",
+        "gpu_acceleration",
+        "performance_mode",
     ):
         values[key] = bool(values.get(key, getattr(base, key)))
     return UISettings(**values)
