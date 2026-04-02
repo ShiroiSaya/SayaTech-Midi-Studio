@@ -16,6 +16,7 @@ _RUNTIME_LOG_PATH: Optional[Path] = None
 _CRASH_DIR: Optional[Path] = None
 _ORIGINAL_SYS_EXCEPTHOOK = sys.excepthook
 _ORIGINAL_THREADING_EXCEPTHOOK = getattr(threading, 'excepthook', None)
+_RUNTIME_DEBUG_ENABLED = False
 
 
 def project_root() -> Path:
@@ -41,7 +42,14 @@ def _now() -> str:
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
 
-def append_runtime_log(message: str) -> None:
+def set_runtime_debug_mode(enabled: bool) -> None:
+    global _RUNTIME_DEBUG_ENABLED
+    _RUNTIME_DEBUG_ENABLED = bool(enabled)
+
+
+def append_runtime_log(message: str, *, debug: bool = False) -> None:
+    if debug and not _RUNTIME_DEBUG_ENABLED:
+        return
     try:
         with runtime_log_path().open('a', encoding='utf-8') as f:
             f.write(f'[{_now()}] {message}\n')
