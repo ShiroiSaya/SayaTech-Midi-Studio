@@ -4,12 +4,18 @@ import multiprocessing
 import os
 import sys
 
+# 在 Windows + PyInstaller 冻结程序中，freeze_support() 必须尽早执行。
+# 这样工作进程会在导入 Qt 之前就被正确分流，避免子进程误走 GUI 启动链。
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer, Qt, qInstallMessageHandler
 from PySide6.QtGui import QFont, QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from sayatech_modern.crash_logging import append_runtime_log, install_global_hooks, write_crash_log
-from sayatech_modern.config_io import ensure_config_file, load_config
+from sayatech_modern.config_io import DEFAULT_TEMPLATE, ensure_config_file, load_config
+from sayatech_modern.app_paths import ensure_user_config_file
 from sayatech_modern.main_window import APP_ICON_PATH, MainWindow, SPLASH_IMAGE_PATH
 from sayatech_modern.system_utils import is_admin, relaunch_as_admin
 from sayatech_modern.ui_settings import load_ui_settings
@@ -25,8 +31,7 @@ def _qt_message_filter(_mode, _context, message):
 
 
 def _maybe_auto_elevate() -> bool:
-    project_root = os.path.abspath(os.path.dirname(__file__))
-    config_path = ensure_config_file(os.path.join(project_root, "config.txt"))
+    config_path = ensure_config_file(str(ensure_user_config_file(DEFAULT_TEMPLATE)))
     config = load_config(config_path)
     if not bool(config.get("AUTO_ELEVATE", False)):
         return False
@@ -109,7 +114,6 @@ class StartupSplash(QWidget):
 
 def main() -> int:
     global _QT_HANDLER
-    multiprocessing.freeze_support()
     install_global_hooks()
     append_runtime_log('Application starting.')
     try:
@@ -125,8 +129,7 @@ def main() -> int:
         app.setFont(base_font)
         if os.path.exists(APP_ICON_PATH):
             app.setWindowIcon(QIcon(APP_ICON_PATH))
-        project_root = os.path.abspath(os.path.dirname(__file__))
-        ui_settings = load_ui_settings(project_root)
+        ui_settings = load_ui_settings(None)
         window = MainWindow()
         if os.path.exists(APP_ICON_PATH):
             window.setWindowIcon(QIcon(APP_ICON_PATH))
