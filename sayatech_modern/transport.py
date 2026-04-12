@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from .backend import BackendPlaybackHandle, PlaybackBackend
 from .crash_logging import append_runtime_log, write_crash_log
 from .models import MidiAnalysisResult
+from .system_utils import enter_low_latency_mode, leave_low_latency_mode
 
 
 class TransportState(str, Enum):
@@ -38,6 +39,15 @@ class TransportController(QObject):
         self.timer.timeout.connect(self._tick)
         self._last_play_request_at = 0.0
         self._play_debounce_sec = 0.25
+        self._low_latency_active = False
+        self._prepared_analysis_id: Optional[int] = None
+
+    def _bind_analysis_lightweight(self, analysis: Optional[MidiAnalysisResult]) -> None:
+        if hasattr(self.backend, 'analysis'):
+            try:
+                self.backend.analysis = analysis
+            except Exception:
+                pass
 
     def set_backend(self, backend: PlaybackBackend) -> None:
         if self.backend is backend:
@@ -46,25 +56,62 @@ class TransportController(QObject):
             self.stop()
         self.backend = backend
         if self.analysis:
-            self.handle = self.backend.prepare(self.analysis)
-            self.position_sec = 0.0
+            self.handle = None
+            self._prepared_analysis_id = None
+            self._bind_analysis_lightweight(self.analysis)
             self.duration_sec = self.analysis.duration_sec
+            self.position_sec = max(0.0, min(self.position_sec, self.duration_sec))
             self.position_changed.emit(self.position_sec, self.duration_sec)
 
-    def set_analysis(self, analysis: MidiAnalysisResult) -> None:
+    def set_analysis(self, analysis: MidiAnalysisResult, prepare: bool = True) -> None:
         self.analysis = analysis
-        self.handle = self.backend.prepare(analysis)
-        self.position_sec = 0.0
         self.duration_sec = analysis.duration_sec
+        self.position_sec = 0.0
         self.state = TransportState.STOPPED
+        if prepare:
+            self.handle = self.backend.prepare(analysis)
+            self._prepared_analysis_id = id(analysis)
+        else:
+            self.handle = None
+            self._prepared_analysis_id = None
+            self._bind_analysis_lightweight(analysis)
         self.analysis_changed.emit(analysis)
         self.position_changed.emit(self.position_sec, self.duration_sec)
         self.state_changed.emit(self.state.value)
         self.log.emit(f"已装载时间轴：{analysis.duration_sec:.2f}s")
 
+    def ensure_prepared(self, *, reset_position: bool = False) -> bool:
+        if self.analysis is None or self.state == TransportState.PLAYING:
+            return False
+        if self.handle is not None and self._prepared_analysis_id == id(self.analysis):
+            return True
+        self.handle = self.backend.prepare(self.analysis)
+        self._prepared_analysis_id = id(self.analysis)
+        self.duration_sec = self.analysis.duration_sec
+        if reset_position:
+            self.position_sec = 0.0
+        else:
+            self.position_sec = max(0.0, min(self.position_sec, self.duration_sec))
+        return True
+
+    def refresh_prepared_analysis(self, *, reset_position: bool = True, emit_analysis_changed: bool = False) -> bool:
+        if not self.ensure_prepared(reset_position=reset_position):
+            return False
+        self.state = TransportState.STOPPED
+        if emit_analysis_changed and self.analysis is not None:
+            self.analysis_changed.emit(self.analysis)
+        self.position_changed.emit(self.position_sec, self.duration_sec)
+        self.state_changed.emit(self.state.value)
+        return True
+
     def play(self) -> None:
-        if not self.analysis or not self.handle:
+        if not self.analysis:
             self.log.emit("未装载 MIDI，无法开始。")
+            return
+        if not self.handle or self._prepared_analysis_id != id(self.analysis):
+            self.ensure_prepared(reset_position=False)
+        if not self.handle:
+            self.log.emit("播放数据尚未准备好。")
             return
         now = time.monotonic()
         if self.state == TransportState.PLAYING and getattr(self.handle, "is_running", False):
@@ -75,6 +122,7 @@ class TransportController(QObject):
             return
         self._last_play_request_at = now
         try:
+            self._ensure_low_latency_mode()
             self.backend.start(self.handle, self.position_sec)
             self._position_anchor = self.position_sec
             self._play_started_at = time.perf_counter()
@@ -88,6 +136,7 @@ class TransportController(QObject):
             path = write_crash_log('Transport play failed', exc, {'position_sec': self.position_sec, 'duration_sec': self.duration_sec, 'state': self.state.value})
             self.timer.stop()
             self._last_play_request_at = 0.0
+            self._release_low_latency_mode()
             self.state = TransportState.PAUSED if self.position_sec > 0 else TransportState.STOPPED
             self.state_changed.emit(self.state.value)
             self.log.emit(f"开始播放失败，崩溃日志：{path}")
@@ -110,6 +159,7 @@ class TransportController(QObject):
             return
         self.state = TransportState.PAUSED
         self.timer.stop()
+        self._release_low_latency_mode()
         self._last_play_request_at = 0.0
         self.state_changed.emit(self.state.value)
         self.log.emit(f"已暂停：{self.position_sec:.2f}s")
@@ -121,13 +171,20 @@ class TransportController(QObject):
         except BaseException as exc:
             path = write_crash_log('Transport stop failed', exc, {'position_sec': self.position_sec, 'duration_sec': self.duration_sec, 'state': self.state.value})
             self.timer.stop()
+            self._release_low_latency_mode()
             self.state = TransportState.STOPPED
             self.state_changed.emit(self.state.value)
             self.log.emit(f"停止失败，崩溃日志：{path}")
             append_runtime_log(f"Transport stop failed; staying alive. log={path}")
             return
+        if hasattr(self.backend, "invalidate_handle_snapshot"):
+            try:
+                self.backend.invalidate_handle_snapshot(self.handle)
+            except Exception:
+                pass
         self.position_sec = 0.0
         self._play_started_at = None
+        self._release_low_latency_mode()
         self._last_play_request_at = 0.0
         self._position_anchor = 0.0
         self.state = TransportState.STOPPED
@@ -151,8 +208,25 @@ class TransportController(QObject):
             self._position_anchor = self.position_sec
             self._play_started_at = time.perf_counter()
             self._last_play_request_at = time.monotonic()
+        else:
+            if hasattr(self.backend, "invalidate_handle_snapshot"):
+                try:
+                    self.backend.invalidate_handle_snapshot(self.handle)
+                except Exception:
+                    pass
         self.position_changed.emit(self.position_sec, self.duration_sec)
         self.log.emit(f"已跳转到：{self.position_sec:.2f}s")
+
+    def _ensure_low_latency_mode(self) -> None:
+        if self._low_latency_active:
+            return
+        self._low_latency_active = bool(enter_low_latency_mode())
+
+    def _release_low_latency_mode(self) -> None:
+        if not self._low_latency_active:
+            return
+        leave_low_latency_mode()
+        self._low_latency_active = False
 
     def toggle_play_pause(self) -> None:
         if self.state == TransportState.PLAYING:
