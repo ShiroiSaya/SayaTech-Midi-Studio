@@ -12,8 +12,8 @@ DEFAULT_ITEMS: List[tuple[str, str]] = [
     ("MIN_NOTE_LEN", "0.15"),
     ("MAX_SIMULTANEOUS", "none"),
     ("RETRIGGER_GAP", "0.021"),
-    ("HIGH_FREQ_COMPAT", "false"),
-    ("HIGH_FREQ_RELEASE_ADVANCE", "0.000"),
+    ("HIGH_FREQ_COMPAT", "true"),
+    ("HIGH_FREQ_RELEASE_ADVANCE", "0.018"),
     ("RETRIGGER_MODE", "true"),
     ("RETRIGGER_PRIORITY", "latest"),
     ("INSTRUMENT_MODE", "钢琴"),
@@ -25,14 +25,15 @@ DEFAULT_ITEMS: List[tuple[str, str]] = [
     ("AUTO_TRANSPOSE", "true"),
     ("AUTO_SHIFT_FROM_RANGE", "true"),
     ("USE_SHIFT_OCTAVE", "true"),
-    ("SHIFT_KEY", "shift"),
-    ("LOOKAHEAD_NOTES", "24"),
+        ("LOOKAHEAD_NOTES", "24"),
     ("SWITCH_MARGIN", "2"),
     ("MIN_NOTES_BETWEEN_SWITCHES", "12"),
     ("SHIFT_WEIGHT", "1.45"),
     ("USE_PEDAL", "true"),
     ("PEDAL_ON_VALUE", "64"),
     ("PEDAL_TAP_TIME", "0.08"),
+    ("FORCE_PEDAL_MODE", "关闭"),
+    ("FORCE_PEDAL_REPRESS_GAP", "0.038"),
     ("CHORD_PRIORITY", "false"),
     ("CHORD_SPLIT_THRESHOLD", "0.05"),
     ("OCTAVE_FOLD_PRIORITY", "true"),
@@ -63,8 +64,7 @@ DEFAULT_ITEMS: List[tuple[str, str]] = [
     ("USE_VELOCITY_RULES", "true"),
     ("USE_SMART_KEEP", "true"),
     ("PREFER_CHANNEL_10", "true"),
-    ("AUTO_ELEVATE", "false"),
-    ("GUI_TITLE", "SayaTech MIDI 自动弹奏"),
+        ("GUI_TITLE", "SayaTech MIDI 自动弹奏"),
     ("INPUT_BACKEND", "sendinput"),
 ]
 
@@ -84,25 +84,24 @@ class FieldSpec:
 
 
 SUPPORTED_FIELDS: List[FieldSpec] = [
-    FieldSpec("INSTRUMENT_MODE", "乐器模式", "choice", "音域与键位", "选择当前乐器档案。贝斯会使用独立的起始页和区间约束。", ["钢琴", "吉他", "贝斯"]),
-    FieldSpec("LEFTMOST_NOTE", "基础窗口起点", "note", "音域与键位", "基础窗口最左边对应的音名。通常设成你当前页最左边那个白键，例如 C3。"),
-    FieldSpec("VISIBLE_OCTAVES", "窗口八度数", "int", "音域与键位", "当前一页横向能覆盖多少个八度。3 代表 36 键布局。"),
+    FieldSpec("INSTRUMENT_MODE", "乐器模式", "choice", "音域与键位", "选择当前要演奏的乐器。贝斯会自动按贝斯规则处理起始页和区间。", ["钢琴", "吉他", "贝斯"]),
+    FieldSpec("LEFTMOST_NOTE", "基础窗口起点", "note", "音域与键位", "窗口最左侧对应的音名。钢琴 / 吉他通常用 C3；贝斯通常用 C0。"),
     FieldSpec("UNLOCKED_MIN_NOTE", "可弹最低音", "note", "音域与键位", "你在游戏里已经解锁并且能实际弹到的最低音。"),
     FieldSpec("UNLOCKED_MAX_NOTE", "可弹最高音", "note", "音域与键位", "你在游戏里已经解锁并且能实际弹到的最高音。"),
     FieldSpec("KEYMAP", "键位映射", "text", "音域与键位", "从左到右的实际按键映射。顺序必须和游戏键位一一对应。"),
     FieldSpec("AUTO_TRANSPOSE", "自动适配音域", "bool", "演奏与切区", "自动把整首歌整体挪到更适合当前可弹范围的位置，适用于钢琴 / 吉他 / 贝斯。大多数情况建议开启。"),
-    FieldSpec("AUTO_SHIFT_FROM_RANGE", "按音域自动判断切区", "bool", "演奏与切区", "根据你当前可弹范围自动判断是否需要区间移动；完整覆盖时会自动固定区间，避免无意义切换。"),
-            FieldSpec("LOOKAHEAD_NOTES", "预读音符数", "int", "演奏与切区", "提前观察后面多少个音再决定要不要切换窗口。越大越稳，反应也会稍慢。"),
+    FieldSpec("AUTO_SHIFT_FROM_RANGE", "按音域自动判断切区", "bool", "演奏与切区", "根据你填写的可弹区间自动判断要不要切区；完整覆盖时会尽量保持当前区间不乱跳。"),
+            FieldSpec("LOOKAHEAD_NOTES", "预读音符数", "int", "演奏与切区", "提前看后面多少个音再决定要不要切区。越大越稳，切换也会更保守。"),
     FieldSpec("SWITCH_MARGIN", "切换保守度", "int", "演奏与切区", "越大越不容易切换窗口，能减少来回抖动。"),
     FieldSpec("MIN_NOTES_BETWEEN_SWITCHES", "切换冷却音符数", "int", "演奏与切区", "两次窗口切换之间至少要隔多少个音，防止频繁左右横跳。"),
-    FieldSpec("SHIFT_WEIGHT", "区间移动偏好", "float", "演奏与切区", "越大越倾向选择区间移动。短区间固定时这个值会自动降权。"),
+    FieldSpec("SHIFT_WEIGHT", "区间移动偏好", "float", "演奏与切区", "越大越愿意为了后续音符去切区。"),
     FieldSpec("MIN_NOTE_LEN", "最短按键时长", "float", "演奏与切区", "单个音至少按住多久。太短容易吞音，默认 0.15 秒更稳。"),
     FieldSpec("RETRIGGER_MODE", "同键重新起音", "bool", "重触发与踏板", "同一个键还没松开时再次遇到同键音，会先抬再按，保证重新起音。"),
     FieldSpec("RETRIGGER_PRIORITY", "重叠音释放策略", "choice", "重触发与踏板", "latest 表示按到最后出现的那层，first 表示优先保留第一次的结束时长。", ["latest", "first"]),
-    FieldSpec("RETRIGGER_GAP", "同键重按间隔", "float", "重触发与踏板", "同键抬起后再次按下前等待多久。值越小反应越快，但某些游戏里过短会吞音。"),
+    FieldSpec("RETRIGGER_GAP", "同键重按间隔", "float", "重触发与踏板", "同一个键松开后，间隔多久再按下。太小虽然更快，但部分游戏会吞音。"),
     FieldSpec("USE_PEDAL", "启用踏板识别", "bool", "重触发与踏板", "读取 MIDI 踏板并用空格键模拟。钢琴曲常用，没踏板的歌关不关都行。"),
     FieldSpec("PEDAL_ON_VALUE", "踏板触发阈值", "int", "重触发与踏板", "MIDI 踏板值高于这个阈值时视为踩下。常见默认是 64。"),
-    FieldSpec("PEDAL_TAP_TIME", "踏板点按时长", "float", "重触发与踏板", "模拟空格踏板时，每次点按保持多久。"),
+    FieldSpec("PEDAL_TAP_TIME", "踏板点按时长", "float", "重触发与踏板", "模拟空格踏板时，每次点按保持多久。只影响普通 MIDI 踏板读取。"),
     FieldSpec("CHORD_PRIORITY", "和弦优先", "bool", "和弦与折返", "更偏向保留和弦结构，而不是只盯着旋律线。"),
     FieldSpec("CHORD_SPLIT_THRESHOLD", "和弦判定间隔", "float", "和弦与折返", "起音时间相差不超过这个值的音，会被当成同一和弦。"),
     FieldSpec("OCTAVE_FOLD_PRIORITY", "启用八度折返", "bool", "和弦与折返", "音超出当前窗口时，优先尝试用上下八度折返来救回可弹性。"),
@@ -123,8 +122,10 @@ SUPPORTED_FIELDS: List[FieldSpec] = [
     FieldSpec("SHIFT_HOLD_RELEASE_DELAY", "低音延迟释放", "float", "低音层保留", "切区后低音层延迟多久再抬起。太长会糊，太短又听不出层次。"),
     FieldSpec("OCTAVE_AVOID_COLLISION", "启用防撞", "bool", "高级模式", "尝试避免折返后与邻近音域撞到同一个键位。一般只在特殊曲子里再开。"),
     FieldSpec("OCTAVE_PREVIEW_NEIGHBORS", "邻近预览数量", "int", "高级模式", "看后面多少个邻近音来辅助防撞判断。0 代表关闭。"),
-    FieldSpec("HIGH_FREQ_COMPAT", "启用高频兼容", "bool", "高级模式", "遇到高密度音符时，允许提前抬起按键来换取更稳定的重新触发。默认关闭，只有你确认游戏会吞短间隔连点时再开。"),
-    FieldSpec("HIGH_FREQ_RELEASE_ADVANCE", "高频兼容提前抬起", "float", "高级模式", "把原本的抬键时间整体提前多少秒。0 代表关闭；例如 0.018 表示提前 18ms 抬起。"),
+    FieldSpec("HIGH_FREQ_COMPAT", "启用高频兼容", "bool", "高级模式", "遇到高密度音符时，允许提前抬起按键来换取更稳定的重新触发。现在默认开启，默认值 0.018 秒更稳；不需要时你也可以手动关闭。"),
+    FieldSpec("HIGH_FREQ_RELEASE_ADVANCE", "高频兼容提前抬起", "float", "高级模式", "把原本的抬键时间整体提前多少秒。默认 0.018 表示提前 18ms 抬起；自动调参不会改它。"),
+    FieldSpec("FORCE_PEDAL_MODE", "强制节拍踏板", "choice", "高级模式", "开启后会忽略 MIDI 自带踏板，改为按固定节拍自动重踩。适合原 MIDI 踏板写得太碎、太短或几乎没写的曲子。", ["关闭", "半拍", "整拍", "半小节", "整小节"]),
+    FieldSpec("FORCE_PEDAL_REPRESS_GAP", "强制踏板重踩间隔", "float", "高级模式", "控制相邻两次重新开踏板之间的总间隔。程序会在下一个目标拍点前先关踏板，到拍点时再重新开启。默认 0.038；低于 0.036 时，部分游戏可能会吞空格。"),
 ]
 
 FIELD_MAP = {spec.key: spec for spec in SUPPORTED_FIELDS}
@@ -142,7 +143,7 @@ INT_FIELDS = {
 }
 FLOAT_FIELDS = {
     "BASE_TAP_HOLD", "SAME_TIME_WINDOW", "DENSITY_LIMIT_HZ", "COARSE_GROUP_WINDOW", "START_DELAY", "MIN_NOTE_LEN",
-    "RETRIGGER_GAP", "HIGH_FREQ_RELEASE_ADVANCE", "PEDAL_TAP_TIME", "SHIFT_WEIGHT", "CHORD_SPLIT_THRESHOLD", "OCTAVE_FOLD_WEIGHT",
+    "RETRIGGER_GAP", "HIGH_FREQ_RELEASE_ADVANCE", "PEDAL_TAP_TIME", "FORCE_PEDAL_REPRESS_GAP", "SHIFT_WEIGHT", "CHORD_SPLIT_THRESHOLD", "OCTAVE_FOLD_WEIGHT",
     "SHIFT_HOLD_RELEASE_DELAY", "MELODY_PITCH_WEIGHT", "MELODY_DURATION_WEIGHT", "MELODY_CONTINUITY_WEIGHT",
 }
 LIST_FIELDS = {"KEYMAP"}
