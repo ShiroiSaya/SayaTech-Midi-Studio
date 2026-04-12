@@ -7,10 +7,131 @@ from typing import DefaultDict, Iterable, List, Tuple, Dict
 
 import mido
 
-from .gpu_accel import build_timeline_with_backend
+from .gpu_accel import build_raw_bars_by_track_with_backend, build_timeline_with_backend
+from .cache_store import file_fingerprint, load_pickle, make_key, save_pickle
 from .models import MidiAnalysisResult, NoteSpan, PedalEvent, TimelineOverview, TrackInfo
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+DEFAULT_GROUP_THRESHOLD_SEC = 0.035
+ANALYSIS_CACHE_VERSION = 4
+FILTER_CACHE_VERSION = 4
+
+
+def _build_meter_markers(duration: float, ticks_per_beat: int, tempo_points: list[tuple[int, float, int]], time_signature_points: list[tuple[int, float, int, int]], end_tick: int) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
+    if duration <= 0 or ticks_per_beat <= 0:
+        return (), (), (), ()
+    tempo_points = sorted(tempo_points or [(0, 0.0, 500000)], key=lambda item: (float(item[0]), float(item[1])))
+    time_signature_points = sorted(time_signature_points or [(0, 0.0, 4, 4)], key=lambda item: (float(item[0]), float(item[1])))
+    if not tempo_points or tempo_points[0][0] != 0:
+        tempo_points.insert(0, (0, 0.0, 500000))
+    if not time_signature_points or time_signature_points[0][0] != 0:
+        time_signature_points.insert(0, (0, 0.0, 4, 4))
+
+    def tick_to_sec(target_tick: float) -> float:
+        anchor_tick, anchor_sec, anchor_tempo = tempo_points[0]
+        for next_tick, next_sec, next_tempo in tempo_points[1:]:
+            if target_tick < next_tick:
+                break
+            anchor_tick, anchor_sec, anchor_tempo = next_tick, next_sec, next_tempo
+        delta_tick = float(target_tick) - float(anchor_tick)
+        return float(anchor_sec) + float(mido.tick2second(delta_tick, ticks_per_beat, int(anchor_tempo)))
+
+    end_tick = max(int(end_tick), int(tempo_points[-1][0]))
+    if time_signature_points:
+        end_tick = max(end_tick, int(time_signature_points[-1][0]))
+    if end_tick <= 0:
+        return (), (), (), ()
+    beat_markers: list[float] = []
+    half_beat_markers: list[float] = []
+    half_bar_markers: list[float] = []
+    bar_markers: list[float] = []
+    eps = 1e-9
+
+    def append_step_markers(bucket: list[float], start_tick: float, stop_tick: float, step_tick: float) -> None:
+        if step_tick <= 0:
+            return
+        pos = float(start_tick) + float(step_tick)
+        while pos <= float(stop_tick) + eps:
+            sec = tick_to_sec(pos)
+            if 0.0 < sec < duration - 1e-6:
+                if not bucket or abs(bucket[-1] - sec) > 1e-6:
+                    bucket.append(float(sec))
+            pos += float(step_tick)
+
+    for idx, (seg_tick, _seg_sec, numerator, denominator) in enumerate(time_signature_points):
+        next_tick = time_signature_points[idx + 1][0] if idx + 1 < len(time_signature_points) else end_tick
+        if next_tick <= seg_tick:
+            continue
+        beat_ticks = float(ticks_per_beat) * 4.0 / max(1, int(denominator))
+        bar_ticks = beat_ticks * max(1, int(numerator))
+        append_step_markers(half_beat_markers, seg_tick, next_tick, beat_ticks / 2.0)
+        append_step_markers(beat_markers, seg_tick, next_tick, beat_ticks)
+        append_step_markers(half_bar_markers, seg_tick, next_tick, bar_ticks / 2.0)
+        append_step_markers(bar_markers, seg_tick, next_tick, bar_ticks)
+
+    return tuple(beat_markers), tuple(half_beat_markers), tuple(half_bar_markers), tuple(bar_markers)
+
+
+def _attach_analysis_metadata(analysis: MidiAnalysisResult, fingerprint: dict[str, object], analysis_cache_key: str) -> MidiAnalysisResult:
+    analysis.file_path = os.path.abspath(str(fingerprint.get("path") or analysis.file_path))
+    analysis.source_fingerprint = dict(fingerprint)
+    analysis.source_sha256 = str(fingerprint.get("sha256") or "")
+    analysis.analysis_cache_key = str(analysis_cache_key or "")
+    if not analysis.source_analysis_id:
+        analysis.source_analysis_id = int.from_bytes(analysis.analysis_cache_key.encode("utf-8")[:8].ljust(8, b"0"), "big", signed=False) if analysis.analysis_cache_key else id(analysis)
+    return analysis
+
+
+def _analysis_cache_meta(fingerprint: dict[str, object], extra: dict[str, object]) -> dict[str, object]:
+    meta = dict(extra)
+    meta.update({
+        "path": str(fingerprint.get("path") or ""),
+        "size": int(fingerprint.get("size") or 0),
+        "mtime_ns": int(fingerprint.get("mtime_ns") or 0),
+        "sha256": str(fingerprint.get("sha256") or ""),
+    })
+    return meta
+
+
+def _build_group_cache(notes: List[NoteSpan], threshold: float = DEFAULT_GROUP_THRESHOLD_SEC) -> tuple[tuple[tuple[NoteSpan, ...], ...], tuple[float, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[float, ...]]:
+    if not notes:
+        return (), (), (), (), (), ()
+    groups: List[tuple[NoteSpan, ...]] = []
+    group_starts: List[float] = []
+    group_counts: List[int] = []
+    group_mins: List[int] = []
+    group_maxs: List[int] = []
+    group_avgs: List[float] = []
+    current: List[NoteSpan] = []
+    anchor: float | None = None
+    for note in notes:
+        if anchor is None or note.start_sec - anchor <= threshold:
+            current.append(note)
+            if anchor is None:
+                anchor = float(note.start_sec)
+        else:
+            ordered = tuple(current)
+            groups.append(ordered)
+            group_starts.append(float(ordered[0].start_sec))
+            group_counts.append(len(ordered))
+            note_values = [int(n.midi_note) for n in ordered]
+            group_mins.append(min(note_values))
+            group_maxs.append(max(note_values))
+            group_avgs.append(sum(note_values) / max(1, len(note_values)))
+            current = [note]
+            anchor = float(note.start_sec)
+    if current:
+        ordered = tuple(current)
+        groups.append(ordered)
+        group_starts.append(float(ordered[0].start_sec))
+        group_counts.append(len(ordered))
+        note_values = [int(n.midi_note) for n in ordered]
+        group_mins.append(min(note_values))
+        group_maxs.append(max(note_values))
+        group_avgs.append(sum(note_values) / max(1, len(note_values)))
+    return tuple(groups), tuple(group_starts), tuple(group_counts), tuple(group_mins), tuple(group_maxs), tuple(group_avgs)
 
 
 def midi_to_note_name(note: int) -> str:
@@ -75,7 +196,7 @@ def _raw_bars_for_notes(notes: Iterable[NoteSpan], duration: float, bins: int = 
     return bars
 
 
-def _build_per_track_indexes(notes: List[NoteSpan], pedal_events: List[PedalEvent], duration: float, bins: int) -> tuple[dict[int, tuple[NoteSpan, ...]], dict[int, tuple[PedalEvent, ...]], dict[int, tuple[float, ...]]]:
+def _build_per_track_indexes(notes: List[NoteSpan], pedal_events: List[PedalEvent], duration: float, bins: int, *, use_gpu: bool = False) -> tuple[dict[int, tuple[NoteSpan, ...]], dict[int, tuple[PedalEvent, ...]], dict[int, tuple[float, ...]]]:
     notes_by_track_list: DefaultDict[int, list[NoteSpan]] = defaultdict(list)
     pedals_by_track_list: DefaultDict[int, list[PedalEvent]] = defaultdict(list)
     for note in notes:
@@ -83,8 +204,22 @@ def _build_per_track_indexes(notes: List[NoteSpan], pedal_events: List[PedalEven
     for event in pedal_events:
         pedals_by_track_list[int(event.track_index)].append(event)
     raw_bars_by_track: dict[int, tuple[float, ...]] = {}
-    for track_index, track_notes in notes_by_track_list.items():
-        raw_bars_by_track[track_index] = tuple(_raw_bars_for_notes(track_notes, duration, bins=bins))
+    accelerated = build_raw_bars_by_track_with_backend(
+        {
+            track_index: [(note.start_sec, note.end_sec, note.velocity) for note in track_notes]
+            for track_index, track_notes in notes_by_track_list.items()
+            if track_notes
+        },
+        duration,
+        bins,
+        use_gpu=use_gpu,
+    )
+    if accelerated is not None:
+        accelerated_raw_bars, _backend = accelerated
+        raw_bars_by_track = {track_index: tuple(track_bars) for track_index, track_bars in accelerated_raw_bars.items()}
+    else:
+        for track_index, track_notes in notes_by_track_list.items():
+            raw_bars_by_track[track_index] = tuple(_raw_bars_for_notes(track_notes, duration, bins=bins))
     notes_by_track = {track_index: tuple(track_notes) for track_index, track_notes in notes_by_track_list.items()}
     pedals_by_track = {track_index: tuple(track_events) for track_index, track_events in pedals_by_track_list.items()}
     return notes_by_track, pedals_by_track, raw_bars_by_track
@@ -157,6 +292,18 @@ def _compute_note_stats(notes: Iterable[NoteSpan]) -> tuple[float, float]:
 
 
 def analyze_midi(file_path: str, bins: int = 96, pedal_threshold: int = 64, *, use_gpu: bool = False) -> MidiAnalysisResult:
+    fingerprint = file_fingerprint(file_path)
+    analysis_cache_key = make_key("analysis", {
+        "sha256": fingerprint.get("sha256"),
+        "bins": int(bins),
+        "pedal_threshold": int(pedal_threshold),
+        "group_threshold": DEFAULT_GROUP_THRESHOLD_SEC,
+        "cache_version": ANALYSIS_CACHE_VERSION,
+    })
+    cached = load_pickle("analyses", analysis_cache_key)
+    if isinstance(cached, MidiAnalysisResult):
+        return _attach_analysis_metadata(cached, fingerprint, analysis_cache_key)
+
     mid = mido.MidiFile(file_path)
 
     track_infos: List[TrackInfo] = []
@@ -203,6 +350,8 @@ def analyze_midi(file_path: str, bins: int = 96, pedal_threshold: int = 64, *, u
     tempo = 500000
     first_tempo = 500000
     tempo_change_count = 0
+    tempo_points: list[tuple[int, float, int]] = [(0, 0.0, tempo)]
+    time_signature_points: list[tuple[int, float, int, int]] = [(0, 0.0, 4, 4)]
     last_tick = 0
     abs_sec = 0.0
     active: DefaultDict[Tuple[int, int, int], deque[Tuple[float, int, int]]] = defaultdict(deque)
@@ -217,9 +366,13 @@ def analyze_midi(file_path: str, bins: int = 96, pedal_threshold: int = 64, *, u
 
         if msg.type == "set_tempo":
             tempo = msg.tempo
+            tempo_points.append((int(abs_tick), float(abs_sec), int(msg.tempo)))
             tempo_change_count += 1
             if tempo_change_count == 1:
                 first_tempo = msg.tempo
+            continue
+        if msg.type == "time_signature":
+            time_signature_points.append((int(abs_tick), float(abs_sec), int(getattr(msg, "numerator", 4)), int(getattr(msg, "denominator", 4))))
             continue
         if msg.type == "control_change" and getattr(msg, "control", -1) == 64:
             pedal_events.append(
@@ -293,10 +446,19 @@ def analyze_midi(file_path: str, bins: int = 96, pedal_threshold: int = 64, *, u
     min_note = min((n.midi_note for n in notes), default=48)
     max_note = max((n.midi_note for n in notes), default=84)
     shortest_note_sec, shortest_raw_same_key_gap_sec = _compute_note_stats(notes)
+    beat_markers_sec, half_beat_markers_sec, half_bar_markers_sec, bar_markers_sec = _build_meter_markers(duration, mid.ticks_per_beat, tempo_points, time_signature_points, last_tick)
+    grouped_notes_default, group_start_secs, group_note_counts, group_min_notes, group_max_notes, group_avg_notes = _build_group_cache(notes, DEFAULT_GROUP_THRESHOLD_SEC)
     timeline = _build_timeline(notes, duration, bins=bins, use_gpu=use_gpu)
-    notes_by_track, pedal_events_by_track, track_timeline_raw_bars = _build_per_track_indexes(notes, pedal_events, duration, bins)
+    notes_by_track, pedal_events_by_track, track_timeline_raw_bars = _build_per_track_indexes(notes, pedal_events, duration, bins, use_gpu=use_gpu)
+    track_shortest_note_sec_by_track: dict[int, float] = {}
+    track_shortest_raw_same_key_gap_sec_by_track: dict[int, float] = {}
+    if notes_by_track:
+        for track_index, track_notes in notes_by_track.items():
+            shortest_note_sec_track, shortest_raw_same_key_gap_sec_track = _compute_note_stats(track_notes)
+            track_shortest_note_sec_by_track[int(track_index)] = float(shortest_note_sec_track)
+            track_shortest_raw_same_key_gap_sec_by_track[int(track_index)] = float(shortest_raw_same_key_gap_sec_track)
 
-    return MidiAnalysisResult(
+    result = MidiAnalysisResult(
         file_path=os.path.abspath(file_path),
         track_infos=track_infos,
         notes=notes,
@@ -314,26 +476,56 @@ def analyze_midi(file_path: str, bins: int = 96, pedal_threshold: int = 64, *, u
         notes_by_track=notes_by_track,
         pedal_events_by_track=pedal_events_by_track,
         track_timeline_raw_bars=track_timeline_raw_bars,
+        track_shortest_note_sec_by_track=track_shortest_note_sec_by_track,
+        track_shortest_raw_same_key_gap_sec_by_track=track_shortest_raw_same_key_gap_sec_by_track,
+        group_threshold_sec=DEFAULT_GROUP_THRESHOLD_SEC,
+        grouped_notes_default=grouped_notes_default,
+        group_start_secs=group_start_secs,
+        group_note_counts=group_note_counts,
+        group_min_notes=group_min_notes,
+        group_max_notes=group_max_notes,
+        group_avg_notes=group_avg_notes,
         selected_track_indexes_key=tuple(sorted(t.index for t in track_infos if t.note_count > 0)),
+        source_fingerprint=dict(fingerprint),
+        source_sha256=str(fingerprint.get("sha256") or ""),
+        analysis_cache_key=analysis_cache_key,
+        beat_markers_sec=beat_markers_sec,
+        half_beat_markers_sec=half_beat_markers_sec,
+        half_bar_markers_sec=half_bar_markers_sec,
+        bar_markers_sec=bar_markers_sec,
     )
+    result = _attach_analysis_metadata(result, fingerprint, analysis_cache_key)
+    save_pickle("analyses", analysis_cache_key, result, meta=_analysis_cache_meta(fingerprint, {"kind": "analysis", "bins": int(bins), "pedal_threshold": int(pedal_threshold)}))
+    return result
 
 
 def filter_analysis(analysis: MidiAnalysisResult, selected_track_indexes: Iterable[int], *, bins: int = 96, use_gpu: bool = False) -> MidiAnalysisResult:
-    del use_gpu
     selected_set = {int(idx) for idx in selected_track_indexes}
     if not selected_set:
         return analysis
+    ordered_indexes = tuple(sorted(selected_set))
+    fingerprint = dict(getattr(analysis, "source_fingerprint", None) or file_fingerprint(analysis.file_path))
+    source_sha256 = str(getattr(analysis, "source_sha256", "") or fingerprint.get("sha256") or "")
+    filtered_cache_key = make_key("filtered", {
+        "source_sha256": source_sha256,
+        "selected_track_indexes": ordered_indexes,
+        "bins": int(bins),
+        "timeline_bins": int(getattr(analysis, "timeline_bins", bins) or bins),
+        "cache_version": FILTER_CACHE_VERSION,
+    })
 
     all_note_track_indexes = {t.index for t in analysis.track_infos if t.note_count > 0}
-    ordered_indexes = tuple(sorted(selected_set))
     if ordered_indexes == tuple(sorted(all_note_track_indexes)):
         return analysis
     if analysis.selected_track_indexes_key and ordered_indexes == analysis.selected_track_indexes_key:
         return analysis
+    cached = load_pickle("filtered", filtered_cache_key)
+    if isinstance(cached, MidiAnalysisResult):
+        return _attach_analysis_metadata(cached, fingerprint, filtered_cache_key)
 
     filtered_tracks = [track for track in analysis.track_infos if track.index in selected_set]
     if not filtered_tracks:
-        return MidiAnalysisResult(
+        result = MidiAnalysisResult(
             file_path=analysis.file_path,
             track_infos=[],
             notes=[],
@@ -348,9 +540,28 @@ def filter_analysis(analysis: MidiAnalysisResult, selected_track_indexes: Iterab
             primary_bpm=analysis.primary_bpm,
             has_tempo_changes=analysis.has_tempo_changes,
             timeline_bins=bins,
+            track_shortest_note_sec_by_track={},
+            track_shortest_raw_same_key_gap_sec_by_track={},
+            group_threshold_sec=DEFAULT_GROUP_THRESHOLD_SEC,
+            grouped_notes_default=(),
+            group_start_secs=(),
+            group_note_counts=(),
+            group_min_notes=(),
+            group_max_notes=(),
+            group_avg_notes=(),
             source_analysis_id=analysis.source_analysis_id or id(analysis),
             selected_track_indexes_key=ordered_indexes,
+            source_fingerprint=dict(fingerprint),
+            source_sha256=source_sha256,
+            analysis_cache_key=filtered_cache_key,
+            beat_markers_sec=tuple(getattr(analysis, 'beat_markers_sec', ()) or ()),
+            half_beat_markers_sec=tuple(getattr(analysis, 'half_beat_markers_sec', ()) or ()),
+            half_bar_markers_sec=tuple(getattr(analysis, 'half_bar_markers_sec', ()) or ()),
+            bar_markers_sec=tuple(getattr(analysis, 'bar_markers_sec', ()) or ()),
         )
+        result = _attach_analysis_metadata(result, fingerprint, filtered_cache_key)
+        save_pickle("filtered", filtered_cache_key, result, meta=_analysis_cache_meta(fingerprint, {"kind": "filtered", "selected_track_indexes": list(ordered_indexes), "bins": int(bins)}))
+        return result
 
     notes_by_track = getattr(analysis, 'notes_by_track', None) or {}
     pedals_by_track = getattr(analysis, 'pedal_events_by_track', None) or {}
@@ -380,7 +591,28 @@ def filter_analysis(analysis: MidiAnalysisResult, selected_track_indexes: Iterab
 
     min_note = min((track.min_note for track in filtered_tracks if track.min_note is not None), default=analysis.min_note)
     max_note = max((track.max_note for track in filtered_tracks if track.max_note is not None), default=analysis.max_note)
-    shortest_note_sec, shortest_raw_same_key_gap_sec = _compute_note_stats(filtered_notes)
+    track_shortest_note_sec_by_track_src = getattr(analysis, 'track_shortest_note_sec_by_track', None) or {}
+    track_shortest_raw_same_key_gap_sec_by_track_src = getattr(analysis, 'track_shortest_raw_same_key_gap_sec_by_track', None) or {}
+    filtered_track_shortest_note_sec_by_track = {
+        track_index: float(track_shortest_note_sec_by_track_src.get(track_index, 0.0) or 0.0)
+        for track_index in ordered_indexes
+        if track_index in track_shortest_note_sec_by_track_src
+    }
+    filtered_track_shortest_raw_same_key_gap_sec_by_track = {
+        track_index: float(track_shortest_raw_same_key_gap_sec_by_track_src.get(track_index, 0.0) or 0.0)
+        for track_index in ordered_indexes
+        if track_index in track_shortest_raw_same_key_gap_sec_by_track_src
+    }
+    shortest_note_candidates = [value for value in filtered_track_shortest_note_sec_by_track.values() if value > 0.0]
+    shortest_gap_candidates = [value for value in filtered_track_shortest_raw_same_key_gap_sec_by_track.values() if value > 0.0]
+    shortest_note_sec = min(shortest_note_candidates) if shortest_note_candidates else 0.0
+    shortest_raw_same_key_gap_sec = min(shortest_gap_candidates) if shortest_gap_candidates else 0.0
+    if (shortest_note_sec <= 0.0 or shortest_raw_same_key_gap_sec <= 0.0) and filtered_notes:
+        fallback_shortest_note_sec, fallback_shortest_raw_same_key_gap_sec = _compute_note_stats(filtered_notes)
+        if shortest_note_sec <= 0.0:
+            shortest_note_sec = fallback_shortest_note_sec
+        if shortest_raw_same_key_gap_sec <= 0.0:
+            shortest_raw_same_key_gap_sec = fallback_shortest_raw_same_key_gap_sec
 
     if raw_bars_by_track and analysis.timeline_bins == bins:
         raw_bars = [0.0 for _ in range(max(1, bins))]
@@ -390,14 +622,14 @@ def filter_analysis(analysis: MidiAnalysisResult, selected_track_indexes: Iterab
                 raw_bars[bar_index] += value
         timeline = _normalize_raw_bars(raw_bars, analysis.duration_sec)
     else:
-        timeline = _build_timeline(filtered_notes, analysis.duration_sec, bins=bins, use_gpu=False)
+        timeline = _build_timeline(filtered_notes, analysis.duration_sec, bins=bins, use_gpu=use_gpu)
         if filtered_notes_by_track or filtered_pedals_by_track:
-            _, _, filtered_raw_bars = _build_per_track_indexes(filtered_notes, filtered_pedals, analysis.duration_sec, bins)
+            _, _, filtered_raw_bars = _build_per_track_indexes(filtered_notes, filtered_pedals, analysis.duration_sec, bins, use_gpu=use_gpu)
         else:
-            filtered_notes_by_track, filtered_pedals_by_track, filtered_raw_bars = _build_per_track_indexes(filtered_notes, filtered_pedals, analysis.duration_sec, bins)
+            filtered_notes_by_track, filtered_pedals_by_track, filtered_raw_bars = _build_per_track_indexes(filtered_notes, filtered_pedals, analysis.duration_sec, bins, use_gpu=use_gpu)
 
     if not filtered_notes_by_track or not filtered_pedals_by_track:
-        fallback_notes_by_track, fallback_pedals_by_track, fallback_raw_bars = _build_per_track_indexes(filtered_notes, filtered_pedals, analysis.duration_sec, bins)
+        fallback_notes_by_track, fallback_pedals_by_track, fallback_raw_bars = _build_per_track_indexes(filtered_notes, filtered_pedals, analysis.duration_sec, bins, use_gpu=use_gpu)
         if not filtered_notes_by_track:
             filtered_notes_by_track = fallback_notes_by_track
         if not filtered_pedals_by_track:
@@ -405,7 +637,9 @@ def filter_analysis(analysis: MidiAnalysisResult, selected_track_indexes: Iterab
         if 'filtered_raw_bars' not in locals() or not filtered_raw_bars:
             filtered_raw_bars = fallback_raw_bars
 
-    return MidiAnalysisResult(
+    grouped_notes_default, group_start_secs, group_note_counts, group_min_notes, group_max_notes, group_avg_notes = _build_group_cache(filtered_notes, DEFAULT_GROUP_THRESHOLD_SEC)
+
+    result = MidiAnalysisResult(
         file_path=analysis.file_path,
         track_infos=filtered_tracks,
         notes=filtered_notes,
@@ -423,7 +657,26 @@ def filter_analysis(analysis: MidiAnalysisResult, selected_track_indexes: Iterab
         notes_by_track=filtered_notes_by_track,
         pedal_events_by_track=filtered_pedals_by_track,
         track_timeline_raw_bars=filtered_raw_bars,
+        track_shortest_note_sec_by_track=filtered_track_shortest_note_sec_by_track,
+        track_shortest_raw_same_key_gap_sec_by_track=filtered_track_shortest_raw_same_key_gap_sec_by_track,
+        group_threshold_sec=DEFAULT_GROUP_THRESHOLD_SEC,
+        grouped_notes_default=grouped_notes_default,
+        group_start_secs=group_start_secs,
+        group_note_counts=group_note_counts,
+        group_min_notes=group_min_notes,
+        group_max_notes=group_max_notes,
+        group_avg_notes=group_avg_notes,
         source_analysis_id=analysis.source_analysis_id or id(analysis),
         selected_track_indexes_key=ordered_indexes,
+        source_fingerprint=dict(fingerprint),
+        source_sha256=source_sha256,
+        analysis_cache_key=filtered_cache_key,
+        beat_markers_sec=tuple(getattr(analysis, 'beat_markers_sec', ()) or ()),
+        half_beat_markers_sec=tuple(getattr(analysis, 'half_beat_markers_sec', ()) or ()),
+        half_bar_markers_sec=tuple(getattr(analysis, 'half_bar_markers_sec', ()) or ()),
+        bar_markers_sec=tuple(getattr(analysis, 'bar_markers_sec', ()) or ()),
     )
+    result = _attach_analysis_metadata(result, fingerprint, filtered_cache_key)
+    save_pickle("filtered", filtered_cache_key, result, meta=_analysis_cache_meta(fingerprint, {"kind": "filtered", "selected_track_indexes": list(ordered_indexes), "bins": int(bins)}))
+    return result
 
