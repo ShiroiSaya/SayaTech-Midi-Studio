@@ -24,23 +24,14 @@ cd SayaTech-Midi-Studio
 
 ## プレビュー
 
-### メイン画面（MIDI 未読込）
-![Home](docs/assets/screenshot-home-empty.png)
+アプリケーションはモダンなフロストガラス風インターフェースデザインを採用し、ライトモードとダークモードの両方に対応しています。
 
-### ピアノ画面
-![Piano](docs/assets/screenshot-piano.png)
-
-### ドラム画面
-![Drum](docs/assets/screenshot-drum.png)
-
-### 設定画面
-![Settings](docs/assets/screenshot-settings.png)
-
-### スプラッシュ画面
-![Splash](docs/assets/screenshot-splash.png)
-
-### ダークモード
-![Dark Mode](docs/assets/screenshot-dark.png)
+- **メイン画面**：ピアノ、ドラムワークスペース、設定パネルへの素早い切り替えが可能なクリアなナビゲーションバー
+- **ピアノワークスペース**：リアルタイムの MIDI ノート表示、ベロシティパラメータ、時間ウィンドウ設定、自動チューニング機能対応
+- **ドラムワークスペース**：独立したドラムキットパラメータ設定、複数のドラム音色と演奏モードに対応
+- **設定パネル**：ホットキーバインディング、テーマ選択、起動オプションなどを含む統一設定センター
+- **スプラッシュ画面**：オプションのアニメーション起動画面でアプリケーション起動体験を向上
+- **ダークモード**：背景画像を自動的に無効化して可読性を向上、快適な夜間使用体験を提供
 
 ## 主な機能
 

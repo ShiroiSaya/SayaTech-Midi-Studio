@@ -24,23 +24,14 @@ cd SayaTech-Midi-Studio
 
 ## 预览
 
-### 主界面（未载入 MIDI）
-![Home](docs/assets/screenshot-home-empty.png)
+应用提供了现代化的毛玻璃界面设计，支持浅色和深色两种主题模式。
 
-### 钢琴页面
-![Piano](docs/assets/screenshot-piano.png)
-
-### 架子鼓页面
-![Drum](docs/assets/screenshot-drum.png)
-
-### 设置页面
-![Settings](docs/assets/screenshot-settings.png)
-
-### 启动画面
-![Splash](docs/assets/screenshot-splash.png)
-
-### 夜间模式
-![Dark Mode](docs/assets/screenshot-dark.png)
+- **主界面**：清晰的导航栏，支持快速切换钢琴、架子鼓工作台和设置面板
+- **钢琴工作台**：实时显示 MIDI 音符、速度参数、时间窗口设置，支持自动调参
+- **架子鼓工作台**：独立的鼓组参数配置，支持多种鼓音色和演奏模式
+- **设置面板**：统一的配置中心，包括热键绑定、主题选择、启动选项等
+- **启动画面**：可选的动画启动屏幕，提升应用启动体验
+- **深色模式**：自动禁用背景图以保证可读性，提供舒适的夜间使用体验
 
 ## 功能特性
 

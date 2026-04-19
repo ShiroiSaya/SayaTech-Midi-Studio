@@ -24,23 +24,14 @@ cd SayaTech-Midi-Studio
 
 ## Preview
 
-### Main screen (no MIDI loaded)
-![Home](docs/assets/screenshot-home-empty.png)
+The application features a modern frosted glass interface design with support for both light and dark themes.
 
-### Piano workspace
-![Piano](docs/assets/screenshot-piano.png)
-
-### Drum workspace
-![Drum](docs/assets/screenshot-drum.png)
-
-### Settings dialog
-![Settings](docs/assets/screenshot-settings.png)
-
-### Splash screen
-![Splash](docs/assets/screenshot-splash.png)
-
-### Dark mode
-![Dark Mode](docs/assets/screenshot-dark.png)
+- **Main Interface**: Clear navigation bar for quick switching between piano, drum workspaces, and settings panel
+- **Piano Workspace**: Real-time MIDI note display, velocity parameters, time window settings, with automatic tuning support
+- **Drum Workspace**: Independent drum kit parameter configuration, supporting multiple drum sounds and playback modes
+- **Settings Panel**: Unified configuration center including hotkey bindings, theme selection, startup options, and more
+- **Splash Screen**: Optional animated startup screen for enhanced application launch experience
+- **Dark Mode**: Automatically disables background images for better readability, providing a comfortable night-time experience
 
 ## Features
 
