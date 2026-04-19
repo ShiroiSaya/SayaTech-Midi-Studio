@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip list *)",
+      "Bash(python -m py_compile sayatech_modern/status_indicators.py sayatech_modern/theme.py sayatech_modern/widgets.py sayatech_modern/main_window.py)",
+      "Bash(iconv -f UTF-8 -t GBK build_onedir_and_installer.bat)",
+      "Bash(iconv -f UTF-8 -t GBK)"
+    ]
+  }
+}

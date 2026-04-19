@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+env/
+
+# Build / packaging
+build/
+dist/
+installer_output/
+*.spec.bak
+
+# Runtime generated
+ui_settings.json
+crash_logs/
+runtime_logs/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
