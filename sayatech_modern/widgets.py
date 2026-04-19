@@ -41,27 +41,32 @@ class AnimatedButton(QPushButton):
         self.setGraphicsEffect(self._opacity_effect)
         self._anim = QPropertyAnimation(self._opacity_effect, b"opacity", self)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.setMinimumHeight(36)
 
-    def _animate_to(self, value: float) -> None:
+    def _animate_to(self, value: float, duration: int = 120) -> None:
         if not _animations_enabled():
             self._opacity_effect.setOpacity(value)
             return
         self._anim.stop()
-        self._anim.setDuration(animation_duration(120))
+        self._anim.setDuration(animation_duration(duration))
         self._anim.setStartValue(self._opacity_effect.opacity())
         self._anim.setEndValue(value)
         self._anim.start()
 
+    def enterEvent(self, event):
+        self._animate_to(0.88, 100)
+        super().enterEvent(event)
+
     def mousePressEvent(self, event):
-        self._animate_to(0.78)
+        self._animate_to(0.75, 80)
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        self._animate_to(1.0)
+        self._animate_to(0.88, 100)
         super().mouseReleaseEvent(event)
 
     def leaveEvent(self, event):
-        self._animate_to(1.0)
+        self._animate_to(1.0, 120)
         super().leaveEvent(event)
 
 
@@ -71,7 +76,7 @@ class AnimatedSwitch(QCheckBox):
     def __init__(self, text: str = "", parent: Optional[QWidget] = None):
         super().__init__(text, parent)
         self.setCursor(QCursor(Qt.PointingHandCursor))
-        self.setMinimumHeight(28)
+        self.setMinimumHeight(32)
         self._offset = 1.0 if self.isChecked() else 0.0
         self._anim = QPropertyAnimation(self, b"offset", self)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
@@ -79,8 +84,8 @@ class AnimatedSwitch(QCheckBox):
 
     def sizeHint(self):
         hint = super().sizeHint()
-        hint.setHeight(max(30, hint.height()))
-        hint.setWidth(max(72, hint.width() + 12))
+        hint.setHeight(max(36, hint.height()))
+        hint.setWidth(max(88, hint.width() + 16))
         return hint
 
     def _get_offset(self) -> float:
@@ -113,7 +118,7 @@ class AnimatedSwitch(QCheckBox):
             self.toggledAnimated.emit(bool(checked))
             return
         self._anim.stop()
-        self._anim.setDuration(animation_duration(160))
+        self._anim.setDuration(animation_duration(180))
         self._anim.setStartValue(self._offset)
         self._anim.setEndValue(end)
         self._anim.start()
@@ -122,7 +127,7 @@ class AnimatedSwitch(QCheckBox):
     def hitButton(self, pos):
         return self.contentsRect().contains(pos)
 
-    def _resolve_colors(self) -> tuple[QColor, QColor, QColor, QColor]:
+    def _resolve_colors(self) -> tuple[QColor, QColor, QColor, QColor, QColor]:
         app = QApplication.instance()
         is_dark = bool(app.property("uiDarkMode")) if app else False
         preset = str(app.property("uiThemePreset") or "ocean") if app else "ocean"
@@ -131,7 +136,7 @@ class AnimatedSwitch(QCheckBox):
         off_track = QColor(palette["track"])
         on_track = QColor(palette["accent"])
         border = QColor(palette["border"])
-        thumb = QColor("#f8fafc") if is_dark else QColor("#ffffff")
+        thumb = QColor("#ffffff")
         return text_color, off_track, on_track, thumb, border
 
     def paintEvent(self, event):
@@ -141,35 +146,52 @@ class AnimatedSwitch(QCheckBox):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
         text_color, off_track, on_track, thumb, border = self._resolve_colors()
 
         rect = self.contentsRect()
-        track_w = 42
-        track_h = 24
+        track_w = 52
+        track_h = 28
         track_x = rect.x()
         track_y = rect.y() + (rect.height() - track_h) / 2
         track_rect = QRect(int(track_x), int(track_y), track_w, track_h)
         radius = track_h / 2
 
+        # Draw track background with gradient effect
         painter.setPen(Qt.NoPen)
         painter.setBrush(on_track if self.isChecked() else off_track)
         painter.drawRoundedRect(track_rect, radius, radius)
-        painter.setPen(QPen(border, 1))
+
+        # Draw track border
+        painter.setPen(QPen(border, 1.5))
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(track_rect, radius, radius)
 
+        # Draw knob with shadow effect
         knob_margin = 3
         knob_d = track_h - knob_margin * 2
         knob_x = track_rect.x() + knob_margin + int((track_w - knob_d - knob_margin * 2) * self._offset)
         knob_rect = QRect(knob_x, track_rect.y() + knob_margin, knob_d, knob_d)
+
+        # Knob shadow
+        shadow_color = QColor(0, 0, 0, 30)
         painter.setPen(Qt.NoPen)
+        painter.setBrush(shadow_color)
+        painter.drawEllipse(knob_rect.adjusted(0, 1, 0, 1))
+
+        # Knob main
         painter.setBrush(thumb)
+        painter.drawEllipse(knob_rect)
+
+        # Knob border
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(knob_rect)
 
         if self.text():
             painter.setPen(text_color)
-            text_rect = QRect(track_rect.right() + 10, rect.y(), rect.width() - track_w - 14, rect.height())
+            text_rect = QRect(track_rect.right() + 12, rect.y(), rect.width() - track_w - 16, rect.height())
             painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self.text())
 
 
