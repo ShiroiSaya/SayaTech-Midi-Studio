@@ -63,8 +63,24 @@ class MidiAnalysisResult:
     notes_by_track: dict[int, tuple[NoteSpan, ...]] = field(default_factory=dict, repr=False)
     pedal_events_by_track: dict[int, tuple[PedalEvent, ...]] = field(default_factory=dict, repr=False)
     track_timeline_raw_bars: dict[int, tuple[float, ...]] = field(default_factory=dict, repr=False)
+    track_shortest_note_sec_by_track: dict[int, float] = field(default_factory=dict, repr=False)
+    track_shortest_raw_same_key_gap_sec_by_track: dict[int, float] = field(default_factory=dict, repr=False)
+    group_threshold_sec: float = 0.035
+    grouped_notes_default: tuple[tuple[NoteSpan, ...], ...] = field(default_factory=tuple, repr=False)
+    group_start_secs: tuple[float, ...] = field(default_factory=tuple, repr=False)
+    group_note_counts: tuple[int, ...] = field(default_factory=tuple, repr=False)
+    group_min_notes: tuple[int, ...] = field(default_factory=tuple, repr=False)
+    group_max_notes: tuple[int, ...] = field(default_factory=tuple, repr=False)
+    group_avg_notes: tuple[float, ...] = field(default_factory=tuple, repr=False)
     source_analysis_id: Optional[int] = field(default=None, repr=False)
     selected_track_indexes_key: tuple[int, ...] = field(default_factory=tuple, repr=False)
+    source_fingerprint: dict[str, object] = field(default_factory=dict, repr=False)
+    source_sha256: str = field(default="", repr=False)
+    analysis_cache_key: str = field(default="", repr=False)
+    beat_markers_sec: tuple[float, ...] = field(default_factory=tuple, repr=False)
+    half_beat_markers_sec: tuple[float, ...] = field(default_factory=tuple, repr=False)
+    half_bar_markers_sec: tuple[float, ...] = field(default_factory=tuple, repr=False)
+    bar_markers_sec: tuple[float, ...] = field(default_factory=tuple, repr=False)
 
     @property
     def shortest_retrigger_gap_display_sec(self) -> float:
@@ -96,3 +112,6 @@ class DrumPlanReport:
     fallback_counter: List[tuple[str, int]] = field(default_factory=list)
     ignored_counter: List[tuple[str, int]] = field(default_factory=list)
     preview_rows: List[tuple[str, int, str, str]] = field(default_factory=list)
+
+
+__all__ = ["TrackInfo", "NoteSpan", "PedalEvent", "TimelineOverview", "MidiAnalysisResult", "DrumPlanReport"]
