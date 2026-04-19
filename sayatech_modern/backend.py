@@ -7,9 +7,10 @@ import time
 import threading
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple, Tuple
 
 from .crash_logging import append_runtime_log, write_crash_log
+from .cache_store import load_pickle, make_key, save_pickle, stable_hash_payload
 from .models import DrumPlanReport, MidiAnalysisResult, NoteSpan, PedalEvent
 
 try:  # pragma: no cover - runtime dependency on Windows host
@@ -103,10 +104,7 @@ class _SendInputInjector:
 
     def __init__(self, fallback=None):
         self._fallback = fallback
-        # Use a dedicated WinDLL binding here instead of mutating
-        # ctypes.windll.user32.SendInput globally. pydirectinput also binds
-        # SendInput with its own ctypes INPUT structure, and changing the
-        # global argtypes causes its fallback path to crash on Python 3.14.
+        # 使用独立的 WinDLL 绑定调用 SendInput，避免修改全局 ctypes 配置后影响 pydirectinput 的兼容行为。
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
         self._send_input = self._user32.SendInput
         self._send_input.argtypes = (ctypes.c_uint, ctypes.POINTER(_INPUT), ctypes.c_int)
@@ -167,16 +165,24 @@ DEFAULT_KEYMAP = [
     "a", "6", "s", "7", "d", "f", "8", "g", "9", "h", "0", "j",
     "q", "i", "w", "o", "e", "r", "p", "t", "[", "y", "]", "u",
 ]
-DEFAULT_LEFTMOST = 48  # C3
+DEFAULT_LEFTMOST = 48  # 默认窗口左边界：C3
 WINDOW_SIZE = len(DEFAULT_KEYMAP)
-DEFAULT_RIGHTMOST = DEFAULT_LEFTMOST + WINDOW_SIZE - 1  # B5
-DEFAULT_OVERALL_MIN = 21  # A0
-DEFAULT_OVERALL_MAX = 108  # C8
+DEFAULT_RIGHTMOST = DEFAULT_LEFTMOST + WINDOW_SIZE - 1  # 默认窗口右边界：B5
+DEFAULT_OVERALL_MIN = 21  # 理论最低音：A0
+DEFAULT_OVERALL_MAX = 108  # 理论最高音：C8
 MIN_WINDOW_OFFSET = -4
 MAX_WINDOW_OFFSET = 4
+NAV_SAME_KEY_MIN_GAP = 0.020  # 同一导航键的最小重触发间隔。
+BASS_PLAYABLE_START_OFFSET = 16  # 贝斯模式首个可弹音相对页面起点的偏移。
+BASS_PLAYABLE_COUNT = 20         # 贝斯模式单页可弹音数量。
 
 FINE_MODE_TO_OFFSET = {"ctrl": -1, "base": 0, "shift": 1}
 OFFSET_TO_FINE_LABEL = {-1: "左移1八度", 0: "默认", 1: "右移1八度"}
+FINE_TOGGLE_TRANSITIONS = {
+    "base": {"shift": "shift", "ctrlleft": "ctrl"},
+    "shift": {"shift": "base", "ctrlleft": "ctrl"},
+    "ctrl": {"shift": "shift", "ctrlleft": "base"},
+}
 
 
 @dataclass(slots=True)
@@ -192,6 +198,10 @@ class BackendPlaybackHandle:
     fine_mode: str = "base"
     coarse_steps: int = 0
     pedal_on: bool = False
+    actions_snapshot: Optional[List["PianoAction"]] = None
+    action_times_snapshot: Optional[List[float]] = None
+    playback_plan_kind: str = ""
+    prepared_cache_key: Optional[tuple] = None
 
 
 class PlaybackBackend:
@@ -199,6 +209,32 @@ class PlaybackBackend:
         self.log_callback = log_callback
         self._input_backend_requested = INPUT_BACKEND_DEFAULT
         self._key_injector = _build_key_injector(self._input_backend_requested)
+
+    def is_playback_ready(self, analysis: Optional[MidiAnalysisResult] = None) -> bool:
+        return True
+
+    def playback_readiness_text(self, analysis: Optional[MidiAnalysisResult] = None) -> str:
+        return "播放已就绪"
+
+    def playback_stage(self, analysis: Optional[MidiAnalysisResult] = None) -> str:
+        return "full" if self.is_playback_ready(analysis) else "none"
+
+    def active_plan_label(self, handle: Optional[BackendPlaybackHandle] = None, analysis: Optional[MidiAnalysisResult] = None) -> str:
+        plan_kind = str(getattr(handle, "playback_plan_kind", "") or "").strip().lower()
+        if plan_kind == "pure":
+            return "纯净直出"
+        if getattr(self, 'pure_mode', False):
+            return "纯净直出"
+        if plan_kind == "fast":
+            return "快速"
+        if plan_kind == "full":
+            return "完整"
+        stage = self.playback_stage(analysis)
+        if stage == "fast":
+            return "快速"
+        if stage == "full":
+            return "完整"
+        return ""
 
     def _log(self, text: str, *, debug: bool = False) -> None:
         tagged = f"[DEBUG] {text}" if debug else text
@@ -260,6 +296,23 @@ class KeyboardMixin:
         time.sleep(max(0.003, hold))
         self._key_up(key)
 
+    def _sleep_same_key_gap(self, last_up_map: dict[str, float], key: str, min_gap: float) -> None:
+        if min_gap <= 0.0:
+            return
+        last_up = float(last_up_map.get(key, 0.0) or 0.0)
+        if last_up <= 0.0:
+            return
+        remain = (last_up + min_gap) - time.perf_counter()
+        if remain > 0.0:
+            time.sleep(remain)
+
+    def _tap_with_same_key_gap(self, key: str, hold: float, last_up_map: dict[str, float], min_gap: float) -> None:
+        self._sleep_same_key_gap(last_up_map, key, min_gap)
+        self._key_down(key)
+        time.sleep(max(0.003, hold))
+        self._key_up(key)
+        last_up_map[key] = time.perf_counter()
+
     def _release_keys(self, handle: BackendPlaybackHandle, keys: Sequence[str]) -> None:
         for key in list(keys):
             if key not in handle.pressed_keys:
@@ -292,7 +345,7 @@ class LiveBackendBase(PlaybackBackend, KeyboardMixin):
             self._log(f"当前按键注入后端：{backend_label}", debug=True)
         if backend_label == 'noop' and not self._warned_no_keylib:
             self._warned_no_keylib = True
-            self._log("当前环境没有可用的按键注入后端，只会模拟播放进度，不会真实按键注入。")
+            self._log("当前环境没有可用的按键注入后端，只会模拟播放进度，不会真实按键注入。", debug=True)
 
     @staticmethod
     def _is_current_run(handle: BackendPlaybackHandle, stop_event: threading.Event, run_id: int) -> bool:
@@ -371,24 +424,32 @@ class LiveBackendBase(PlaybackBackend, KeyboardMixin):
         else:
             self.instrument_mode = "piano"
         self.base_leftmost = int(config.get("LEFTMOST_NOTE", DEFAULT_LEFTMOST))
-        self.visible_octaves = max(1, int(config.get("VISIBLE_OCTAVES", 3)))
+        self.visible_octaves = 3
         self.overall_min_note = int(config.get("UNLOCKED_MIN_NOTE", DEFAULT_OVERALL_MIN))
         self.overall_max_note = int(config.get("UNLOCKED_MAX_NOTE", DEFAULT_OVERALL_MAX))
+        pure_mode_requested = bool(config.get("PURE_MODE", False))
+        if pure_mode_requested:
+            # 纯净直出模式使用理论可弹范围，不受当前解锁范围限制。
+            self.overall_min_note = DEFAULT_OVERALL_MIN
+            self.overall_max_note = DEFAULT_OVERALL_MAX
         if self.instrument_mode == "bass":
-            self.base_leftmost = 12  # C0，对应贝斯初始页左边界
+            self.base_leftmost = 12  # 贝斯初始页面左边界：C0。
             self.visible_octaves = 3
             self.min_window_offset = 0
             self.max_window_offset = MAX_WINDOW_OFFSET
+            self.idle_reset_offset = 3
         else:
             self.min_window_offset = MIN_WINDOW_OFFSET
             self.max_window_offset = MAX_WINDOW_OFFSET
+            self.idle_reset_offset = 0
         self.window_size = max(1, min(len(self.keymap), self.visible_octaves * 12))
         self.window_rightmost = self.base_leftmost + self.window_size - 1
+        self.pure_mode = pure_mode_requested
         self.auto_transpose = bool(config.get("AUTO_TRANSPOSE", True))
         self.use_pedal = bool(config.get("USE_PEDAL", True))
         self.min_note_len = max(0.01, float(config.get("MIN_NOTE_LEN", self.min_note_len)))
-        self.high_freq_compat = bool(config.get("HIGH_FREQ_COMPAT", False))
-        self.high_freq_release_advance = max(0.0, float(config.get("HIGH_FREQ_RELEASE_ADVANCE", 0.0)))
+        self.high_freq_compat = bool(config.get("HIGH_FREQ_COMPAT", True))
+        self.high_freq_release_advance = max(0.0, float(config.get("HIGH_FREQ_RELEASE_ADVANCE", 0.02)))
         self.use_shift_octave = True
         self.auto_shift_from_range = bool(config.get("AUTO_SHIFT_FROM_RANGE", True))
         self.shift_key = "shift"
@@ -396,8 +457,10 @@ class LiveBackendBase(PlaybackBackend, KeyboardMixin):
         self.min_notes_between_switches = max(0, int(config.get("MIN_NOTES_BETWEEN_SWITCHES", self.min_notes_between_switches)))
         self.shift_weight = max(0.1, float(config.get("SHIFT_WEIGHT", self.shift_weight)))
         self.fixed_window_mode = False
-        range_fits_window = self.overall_min_note >= self.base_leftmost and self.overall_max_note <= self.window_rightmost
-        if self.auto_shift_from_range and self.overall_max_note <= self.window_rightmost:
+        base_playable_left = self._playable_window_left(0)
+        base_playable_right = self._playable_window_right(0)
+        range_fits_window = self.overall_min_note >= base_playable_left and self.overall_max_note <= base_playable_right
+        if self.auto_shift_from_range and self.overall_max_note <= base_playable_right:
             self.use_shift_octave = False
         if range_fits_window and (self.auto_shift_from_range or not self.use_shift_octave):
             self.fixed_window_mode = True
@@ -409,6 +472,8 @@ class LiveBackendBase(PlaybackBackend, KeyboardMixin):
             self.retrigger_priority = "latest"
         self.lookahead_groups = max(1, int(round(int(config.get("LOOKAHEAD_NOTES", 24)) / 3)))
         self.pedal_tap_time = float(config.get("PEDAL_TAP_TIME", 0.08))
+        self.force_pedal_mode = str(config.get("FORCE_PEDAL_MODE", "关闭")).strip()
+        self.force_pedal_repress_gap = max(0.003, float(config.get("FORCE_PEDAL_REPRESS_GAP", 0.07)))
         self.chord_priority = bool(config.get("CHORD_PRIORITY", False))
         self.chord_split_threshold = max(0.0, float(config.get("CHORD_SPLIT_THRESHOLD", 0.035)))
         self.octave_fold_priority = bool(config.get("OCTAVE_FOLD_PRIORITY", True))
@@ -431,12 +496,39 @@ class LiveBackendBase(PlaybackBackend, KeyboardMixin):
         self.melody_duration_weight = float(config.get("MELODY_DURATION_WEIGHT", 0.7))
         self.melody_continuity_weight = float(config.get("MELODY_CONTINUITY_WEIGHT", 1.2))
         self.melody_keep_top = max(1, int(config.get("MELODY_KEEP_TOP", 2)))
+        if self.pure_mode:
+            self.auto_transpose = False
+            self.use_shift_octave = True
+            self.auto_shift_from_range = False
+            self.fixed_window_mode = False
+            self.lookahead_groups = 1
+            self.switch_margin = 0
+            self.min_notes_between_switches = 0
+            self.shift_weight = 1.0
+            self.chord_priority = False
+            self.octave_fold_priority = False
+            self.octave_fold_weight = 0.0
+            self.max_melodic_jump_after_fold = 0
+            self.bar_aware_transpose = False
+            self.bar_transpose_scope = "phrase"
+            self.bar_transpose_threshold = 999999
+            self.shift_hold_bass = False
+            self.shift_hold_max_chord_rank = 0
+            self.shift_hold_release_delay = 0.0
+            self.octave_avoid_collision = False
+            self.octave_preview_neighbors = 0
+            self.melody_priority = False
+            self.melody_pitch_weight = 0.0
+            self.melody_duration_weight = 0.0
+            self.melody_continuity_weight = 0.0
+            self.melody_keep_top = 1
         new_signature = (
-            self.instrument_mode, self.base_leftmost, self.visible_octaves, self.overall_min_note, self.overall_max_note,
+            self.instrument_mode, self.pure_mode, self.base_leftmost, self.visible_octaves, self.overall_min_note, self.overall_max_note,
             self.auto_transpose, self.use_pedal, self.use_shift_octave, self.auto_shift_from_range,
             self.switch_margin, self.min_notes_between_switches, self.shift_weight, self.retrigger_gap,
             self.retrigger_mode, self.retrigger_priority, self.lookahead_groups, self.pedal_tap_time,
             self.high_freq_compat, self.high_freq_release_advance,
+            self.force_pedal_mode, self.force_pedal_repress_gap, self.idle_reset_offset,
             self.chord_priority, self.chord_split_threshold, self.octave_fold_priority, self.octave_fold_weight,
             self.max_melodic_jump_after_fold, self.bar_aware_transpose, self.bar_transpose_scope,
             self.bar_transpose_threshold, self.shift_hold_bass, self.shift_hold_max_note,
@@ -483,20 +575,58 @@ class LiveBackendBase(PlaybackBackend, KeyboardMixin):
         return "ctrl", (offset + 1) // 3
 
     @staticmethod
+    def _offset_target_states(offset: int) -> List[Tuple[str, int]]:
+        rem = offset % 3
+        if rem == 0:
+            coarse = offset // 3
+            return [("base", coarse)]
+        if rem == 1:
+            return [("shift", (offset - 1) // 3)]
+        return [("ctrl", (offset + 1) // 3)]
+
+    @staticmethod
     def _state_to_offset(fine_mode: str, coarse_steps: int) -> int:
         return FINE_MODE_TO_OFFSET[fine_mode] + coarse_steps * 3
 
-    def _state_to_nav_path(self, current_fine: str, current_coarse: int, target_fine: str, target_coarse: int) -> List[Tuple[str, str, int]]:
+    def _state_to_nav_path(self, current_fine: str, current_coarse: int, target_offset: int) -> List[Tuple[str, str, int]]:
+        from collections import deque
+
+        current = (current_fine, int(current_coarse))
+        target_states = set(self._offset_target_states(int(target_offset)))
+        if current in target_states:
+            return []
+        coarse_min = min(self.min_window_offset, self.idle_reset_offset, int(current_coarse), int(target_offset)) - 2
+        coarse_max = max(self.max_window_offset, self.idle_reset_offset, int(current_coarse), int(target_offset)) + 2
+        q = deque([(current, [])])
+        seen = {current}
+        while q:
+            (fine, coarse), path = q.popleft()
+            if (fine, coarse) in target_states:
+                return path
+            for key_name in (self.shift_key, "ctrlleft"):
+                next_fine = FINE_TOGGLE_TRANSITIONS.get(fine, {}).get(key_name)
+                if next_fine is None:
+                    continue
+                state = (next_fine, coarse)
+                if state not in seen:
+                    seen.add(state)
+                    q.append((state, path + [(key_name, next_fine, coarse)]))
+            if coarse + 1 <= coarse_max:
+                state = (fine, coarse + 1)
+                if state not in seen:
+                    seen.add(state)
+                    q.append((state, path + [("period", fine, coarse + 1)]))
+            if coarse - 1 >= coarse_min:
+                state = (fine, coarse - 1)
+                if state not in seen:
+                    seen.add(state)
+                    q.append((state, path + [("comma", fine, coarse - 1)]))
+        target_fine, target_coarse = self._offset_to_state(int(target_offset))
         path: List[Tuple[str, str, int]] = []
         fine = current_fine
         coarse = current_coarse
         if fine != target_fine:
-            if target_fine == "base":
-                nav_key = self.shift_key if fine == "shift" else "ctrlleft"
-            elif target_fine == "shift":
-                nav_key = self.shift_key
-            else:
-                nav_key = "ctrlleft"
+            nav_key = self.shift_key if target_fine == "shift" else "ctrlleft"
             fine = target_fine
             path.append((nav_key, fine, coarse))
         delta = target_coarse - coarse
@@ -511,11 +641,18 @@ class LiveBackendBase(PlaybackBackend, KeyboardMixin):
         return path
 
     def _move_handle_to_offset(self, handle: BackendPlaybackHandle, target_offset: int, tap_hold: float = 0.010) -> None:
-        target_fine, target_coarse = self._offset_to_state(target_offset)
-        path = self._state_to_nav_path(handle.fine_mode, handle.coarse_steps, target_fine, target_coarse)
+        path = self._state_to_nav_path(handle.fine_mode, handle.coarse_steps, target_offset)
         for key_name, fine_mode, coarse_steps in path:
-            self._tap(key_name, tap_hold)
+            self._tap_nav_key(key_name, tap_hold)
             self._set_handle_window(handle, fine_mode, coarse_steps)
+
+    def _pedal_action_tap_hold(self) -> float:
+        base_hold = max(0.003, float(getattr(self, "pedal_tap_time", 0.08) or 0.08))
+        mode = str(getattr(self, "force_pedal_mode", "关闭") or "关闭").strip()
+        if mode == "关闭":
+            return base_hold
+        gap = max(0.003, float(getattr(self, "force_pedal_repress_gap", 0.03) or 0.03))
+        return max(0.003, min(base_hold, 0.006, gap * 0.45))
 
     def _set_pedal_state(self, handle: BackendPlaybackHandle, is_on: bool, tap_hold: float = 0.010) -> None:
         if handle.pedal_on == bool(is_on):
@@ -524,12 +661,13 @@ class LiveBackendBase(PlaybackBackend, KeyboardMixin):
         handle.pedal_on = bool(is_on)
 
     def _reset_to_default_window(self, handle: BackendPlaybackHandle) -> None:
-        if handle.fine_mode != "base" or handle.coarse_steps != 0:
-            path = self._state_to_nav_path(handle.fine_mode, handle.coarse_steps, "base", 0)
+        target_offset = int(getattr(self, "idle_reset_offset", 0))
+        if handle.nav_offset != target_offset or handle.fine_mode != "base" or handle.coarse_steps != target_offset // 3:
+            path = self._state_to_nav_path(handle.fine_mode, handle.coarse_steps, target_offset)
             for key_name, fine_mode, coarse_steps in path:
-                self._tap(key_name, 0.010)
+                self._tap_nav_key(key_name, 0.010)
                 self._set_handle_window(handle, fine_mode, coarse_steps)
-            self._log(f"可弹区间已回到默认 {self._offset_label(0)}", debug=True)
+            self._log(f"可弹区间已回到默认 {self._offset_label(target_offset)}", debug=True)
 
 
 def _note_name(midi_note: int) -> str:
@@ -579,8 +717,8 @@ class ModernPianoBackend(LiveBackendBase):
         self.use_pedal = True
         self.pedal_tap_time = 0.08
         self.min_note_len = 0.10
-        self.high_freq_compat = False
-        self.high_freq_release_advance = 0.0
+        self.high_freq_compat = True
+        self.high_freq_release_advance = 0.02
         self.use_shift_octave = True
         self.auto_shift_from_range = True
         self.shift_key = "shift"
@@ -613,45 +751,241 @@ class ModernPianoBackend(LiveBackendBase):
         self.instrument_mode = "piano"
         self.min_window_offset = MIN_WINDOW_OFFSET
         self.max_window_offset = MAX_WINDOW_OFFSET
+        self.idle_reset_offset = 0
+        self.force_pedal_mode = "关闭"
+        self.force_pedal_repress_gap = 0.03
+        self.pure_mode = False
         self._config_signature = None
         self._actions_cache: Optional[List[PianoAction]] = None
         self._action_times_cache: Optional[List[float]] = None
         self._actions_cache_key: Optional[tuple] = None
+        self._fast_actions_cache: Optional[List[PianoAction]] = None
+        self._fast_action_times_cache: Optional[List[float]] = None
+        self._fast_actions_cache_key: Optional[tuple] = None
         self._prewarm_thread: Optional[threading.Thread] = None
         self._prewarm_target_key: Optional[tuple] = None
+        self._prewarm_stage: str = "idle"
         self._pending_prewarm: Optional[tuple[tuple, MidiAnalysisResult]] = None
         self._cache_lock = threading.Lock()
+        self._nav_last_up_perf: dict[str, float] = {}
 
     def prepare(self, analysis: MidiAnalysisResult) -> BackendPlaybackHandle:
+        self._nav_last_up_perf.clear()
         handle = super().prepare(analysis)
-        self._schedule_action_cache_prewarm()
+        idle_offset = int(getattr(self, "idle_reset_offset", 0))
+        idle_fine, idle_coarse = self._offset_to_state(idle_offset)
+        self._set_handle_window(handle, idle_fine, idle_coarse)
+        if self.pure_mode:
+            self._ensure_action_cache()
+            self._bind_handle_snapshot(handle, analysis)
+        else:
+            self._bind_handle_snapshot(handle, analysis)
+            self._schedule_action_cache_prewarm()
         return handle
 
-    def _current_action_cache_key(self) -> Optional[tuple]:
-        if not self.analysis or self._config_signature is None:
+    @staticmethod
+    def _is_nav_key_name(key: str) -> bool:
+        return str(key or '').strip().lower() in {'shift', 'ctrlleft', 'comma', 'period'}
+
+    def _nav_same_key_min_gap(self) -> float:
+        return float(NAV_SAME_KEY_MIN_GAP)
+
+    def _tap_nav_key(self, key: str, hold: float) -> None:
+        if self._is_nav_key_name(key):
+            self._tap_with_same_key_gap(key, hold, self._nav_last_up_perf, self._nav_same_key_min_gap())
+        else:
+            self._tap(key, hold)
+
+    def _nav_path_relative_times(self, path: Sequence[Tuple[str, str, int]], tap_hold: Optional[float] = None) -> List[float]:
+        if not path:
+            return []
+        hold = max(0.003, float(self.nav_tap_hold if tap_hold is None else tap_hold))
+        min_same_key_start_delta = hold + self._nav_same_key_min_gap()
+        times: List[float] = []
+        current_t = 0.0
+        prev_key: Optional[str] = None
+        for key_name, _fine_mode, _coarse_steps in path:
+            key_name = str(key_name or '').strip().lower()
+            if times:
+                step_gap = float(self.nav_step_gap)
+                if prev_key == key_name and self._is_nav_key_name(key_name):
+                    step_gap = max(step_gap, min_same_key_start_delta)
+                current_t += step_gap
+            times.append(current_t)
+            prev_key = key_name
+        return times
+
+    def _cache_key_for_analysis(self, analysis: Optional[MidiAnalysisResult]) -> Optional[tuple]:
+        if analysis is None or self._config_signature is None:
             return None
-        return (id(self.analysis), self._config_signature)
+        return (id(analysis), self._config_signature)
+
+    def _current_action_cache_key(self) -> Optional[tuple]:
+        return self._cache_key_for_analysis(self.analysis)
+
+    def _has_full_cache(self, cache_key: Optional[tuple]) -> bool:
+        return cache_key is not None and cache_key == self._actions_cache_key and self._actions_cache is not None
+
+    def _has_fast_cache(self, cache_key: Optional[tuple]) -> bool:
+        return cache_key is not None and cache_key == self._fast_actions_cache_key and self._fast_actions_cache is not None
+
+    def is_playback_ready(self, analysis: Optional[MidiAnalysisResult] = None) -> bool:
+        cache_key = self._cache_key_for_analysis(analysis or self.analysis)
+        if cache_key is None:
+            return False
+        with self._cache_lock:
+            return self._has_full_cache(cache_key) or self._has_fast_cache(cache_key)
+
+    def playback_readiness_text(self, analysis: Optional[MidiAnalysisResult] = None) -> str:
+        cache_key = self._cache_key_for_analysis(analysis or self.analysis)
+        if cache_key is None:
+            return "尚未装载播放数据"
+        with self._cache_lock:
+            if self._has_full_cache(cache_key):
+                return "播放已就绪"
+            if self._has_fast_cache(cache_key):
+                return "快速预热已就绪（后台继续完善）"
+            if self._prewarm_target_key == cache_key:
+                if self._prewarm_stage == 'full':
+                    return "完整播放预热中"
+                return "快速预热中"
+            if self._pending_prewarm is not None and self._pending_prewarm[0] == cache_key:
+                return "等待预热启动"
+        return "等待构建播放动作"
+
+    def playback_stage(self, analysis: Optional[MidiAnalysisResult] = None) -> str:
+        cache_key = self._cache_key_for_analysis(analysis or self.analysis)
+        if cache_key is None:
+            return "none"
+        with self._cache_lock:
+            if self._has_full_cache(cache_key):
+                return "full"
+            if self._has_fast_cache(cache_key):
+                return "fast"
+            if self._prewarm_target_key == cache_key:
+                return "prewarm_full" if self._prewarm_stage == 'full' else "prewarm_fast"
+            if self._pending_prewarm is not None and self._pending_prewarm[0] == cache_key:
+                return "pending"
+        return "none"
 
     def _get_cached_actions(self) -> Optional[List[PianoAction]]:
         cache_key = self._current_action_cache_key()
         with self._cache_lock:
-            if cache_key is not None and cache_key == self._actions_cache_key and self._actions_cache is not None:
+            if self._has_full_cache(cache_key):
                 return self._actions_cache
+            if self._has_fast_cache(cache_key):
+                return self._fast_actions_cache
         return None
 
     def _get_cached_action_times(self) -> Optional[List[float]]:
         cache_key = self._current_action_cache_key()
         with self._cache_lock:
-            if cache_key is not None and cache_key == self._actions_cache_key and self._action_times_cache is not None:
+            if self._has_full_cache(cache_key):
                 return self._action_times_cache
+            if self._has_fast_cache(cache_key):
+                return self._fast_action_times_cache
         return None
+
+    def _disk_cache_key(self, analysis: Optional[MidiAnalysisResult], stage: str) -> Optional[str]:
+        if analysis is None or self._config_signature is None:
+            return None
+        analysis_key = str(getattr(analysis, "analysis_cache_key", "") or "")
+        if not analysis_key:
+            analysis_key = str(getattr(analysis, "source_sha256", "") or "")
+        if not analysis_key:
+            return None
+        pure_cache_version = 3 if getattr(self, 'pure_mode', False) else 2
+        return make_key("actions", {
+            "analysis": analysis_key,
+            "stage": str(stage),
+            "backend": "piano_actions",
+            "config_signature": stable_hash_payload(self._config_signature),
+            "pure_cache_version": pure_cache_version,
+        })
+
+    def _load_disk_actions(self, analysis: Optional[MidiAnalysisResult], stage: str) -> Optional[tuple[List[PianoAction], List[float]]]:
+        disk_key = self._disk_cache_key(analysis, stage)
+        if not disk_key:
+            return None
+        payload = load_pickle("actions", disk_key)
+        if not isinstance(payload, dict):
+            return None
+        actions = payload.get("actions")
+        action_times = payload.get("action_times")
+        if not isinstance(actions, list) or not isinstance(action_times, list):
+            return None
+        return actions, [float(v) for v in action_times]
+
+    def _save_disk_actions(self, analysis: Optional[MidiAnalysisResult], stage: str, actions: Sequence[PianoAction], action_times: Sequence[float]) -> None:
+        disk_key = self._disk_cache_key(analysis, stage)
+        if not disk_key:
+            return
+        try:
+            save_pickle("actions", disk_key, {
+                "actions": list(actions),
+                "action_times": [float(v) for v in action_times],
+            }, meta={
+                "kind": "actions",
+                "stage": str(stage),
+                "analysis": str(getattr(analysis, "analysis_cache_key", "") or getattr(analysis, "source_sha256", "") or ""),
+            })
+        except Exception:
+            pass
+
+    def _best_cached_plan(self, cache_key: Optional[tuple], analysis: Optional[MidiAnalysisResult]) -> tuple[Optional[List[PianoAction]], Optional[List[float]], str]:
+        with self._cache_lock:
+            if self._has_full_cache(cache_key):
+                return self._actions_cache, self._action_times_cache, "full"
+            if self._has_fast_cache(cache_key):
+                return self._fast_actions_cache, self._fast_action_times_cache, "fast"
+        if analysis is not None:
+            disk_full = self._load_disk_actions(analysis, "full")
+            if disk_full is not None:
+                return disk_full[0], disk_full[1], "full"
+            disk_fast = self._load_disk_actions(analysis, "fast")
+            if disk_fast is not None:
+                return disk_fast[0], disk_fast[1], "fast"
+        return None, None, ""
+
+    def _bind_handle_snapshot(self, handle: BackendPlaybackHandle, analysis: Optional[MidiAnalysisResult]) -> None:
+        cache_key = self._cache_key_for_analysis(analysis)
+        actions, action_times, plan_kind = self._best_cached_plan(cache_key, analysis)
+        handle.prepared_cache_key = cache_key
+        if actions is None or action_times is None:
+            handle.actions_snapshot = None
+            handle.action_times_snapshot = None
+            handle.playback_plan_kind = ""
+            return
+        handle.actions_snapshot = list(actions)
+        handle.action_times_snapshot = list(action_times)
+        handle.playback_plan_kind = 'pure' if getattr(self, 'pure_mode', False) else plan_kind
+
+    def invalidate_handle_snapshot(self, handle: Optional[BackendPlaybackHandle]) -> None:
+        if handle is None:
+            return
+        handle.actions_snapshot = None
+        handle.action_times_snapshot = None
+        handle.playback_plan_kind = ""
+        handle.prepared_cache_key = None
+
+    def clear_runtime_caches(self) -> None:
+        with self._cache_lock:
+            self._actions_cache = None
+            self._action_times_cache = None
+            self._actions_cache_key = None
+            self._fast_actions_cache = None
+            self._fast_action_times_cache = None
+            self._fast_actions_cache_key = None
+            self._prewarm_target_key = None
+            self._prewarm_stage = 'idle'
+            self._pending_prewarm = None
 
     @classmethod
     def build_prefetched_actions(cls, analysis: MidiAnalysisResult, config: dict) -> tuple[tuple | None, List[PianoAction]]:
         backend = cls()
         backend.update_config(dict(config))
         backend.analysis = analysis
-        actions = backend._build_actions(analysis.notes, analysis.pedal_events)
+        actions = backend._build_actions(analysis.notes, analysis.pedal_events, analysis=analysis)
         return backend._current_action_cache_key(), actions
 
     def import_prefetched_actions(self, analysis: MidiAnalysisResult, cache_key: tuple | None, actions: Sequence[PianoAction]) -> bool:
@@ -660,14 +994,17 @@ class ModernPianoBackend(LiveBackendBase):
         expected_key = (id(analysis), self._config_signature)
         if cache_key != expected_key:
             return False
+        action_times = [a.t for a in actions]
         with self._cache_lock:
             self._actions_cache = list(actions)
-            self._action_times_cache = [a.t for a in actions]
+            self._action_times_cache = action_times
             self._actions_cache_key = expected_key
-            if self._prewarm_target_key == expected_key:
+            if self._prewarm_target_key == expected_key and self._prewarm_stage == 'full':
                 self._prewarm_target_key = None
+                self._prewarm_stage = 'idle'
             if self._pending_prewarm is not None and self._pending_prewarm[0] == expected_key:
                 self._pending_prewarm = None
+        self._save_disk_actions(analysis, "full", actions, action_times)
         return True
 
     def _ensure_action_cache(self) -> List[PianoAction]:
@@ -677,12 +1014,51 @@ class ModernPianoBackend(LiveBackendBase):
             return cached
         if not self.analysis:
             return []
-        actions = self._build_actions(self.analysis.notes, self.analysis.pedal_events)
+        if self.pure_mode:
+            disk_full = self._load_disk_actions(self.analysis, "full")
+            if disk_full is not None:
+                actions, action_times = disk_full
+            else:
+                actions = self._build_actions(self.analysis.notes, self.analysis.pedal_events, fast_mode=True, analysis=self.analysis)
+                action_times = [a.t for a in actions]
+                self._save_disk_actions(self.analysis, "full", actions, action_times)
+            with self._cache_lock:
+                if cache_key is not None and cache_key == self._current_action_cache_key():
+                    self._actions_cache = actions
+                    self._action_times_cache = action_times
+                    self._actions_cache_key = cache_key
+                    self._fast_actions_cache = actions
+                    self._fast_action_times_cache = action_times
+                    self._fast_actions_cache_key = cache_key
+            return actions
+        disk_full = self._load_disk_actions(self.analysis, "full")
+        if disk_full is not None:
+            actions, action_times = disk_full
+            with self._cache_lock:
+                if cache_key is not None and cache_key == self._current_action_cache_key():
+                    self._actions_cache = actions
+                    self._action_times_cache = action_times
+                    self._actions_cache_key = cache_key
+            return actions
+        disk_fast = self._load_disk_actions(self.analysis, "fast")
+        if disk_fast is not None:
+            actions, action_times = disk_fast
+            with self._cache_lock:
+                if cache_key is not None and cache_key == self._current_action_cache_key():
+                    self._fast_actions_cache = actions
+                    self._fast_action_times_cache = action_times
+                    self._fast_actions_cache_key = cache_key
+            self._schedule_action_cache_prewarm()
+            return actions
+        actions = self._build_actions(self.analysis.notes, self.analysis.pedal_events, fast_mode=True, analysis=self.analysis)
+        action_times = [a.t for a in actions]
         with self._cache_lock:
             if cache_key is not None and cache_key == self._current_action_cache_key():
-                self._actions_cache = actions
-                self._action_times_cache = [a.t for a in actions]
-                self._actions_cache_key = cache_key
+                self._fast_actions_cache = actions
+                self._fast_action_times_cache = action_times
+                self._fast_actions_cache_key = cache_key
+        self._save_disk_actions(self.analysis, "fast", actions, action_times)
+        self._schedule_action_cache_prewarm()
         return actions
 
     def _schedule_action_cache_prewarm(self) -> None:
@@ -693,12 +1069,23 @@ class ModernPianoBackend(LiveBackendBase):
                 self._actions_cache = None
                 self._action_times_cache = None
                 self._actions_cache_key = None
+                self._fast_actions_cache = None
+                self._fast_action_times_cache = None
+                self._fast_actions_cache_key = None
                 self._prewarm_target_key = None
+                self._prewarm_stage = 'idle'
                 self._pending_prewarm = None
+            return
+        if self.pure_mode:
+            with self._cache_lock:
+                self._prewarm_target_key = None
+                self._prewarm_stage = 'idle'
+                self._pending_prewarm = None
+            self._ensure_action_cache()
             return
         launch_thread = False
         with self._cache_lock:
-            if self._actions_cache_key == cache_key and self._actions_cache is not None:
+            if self._has_full_cache(cache_key):
                 return
             self._pending_prewarm = (cache_key, analysis)
             if self._prewarm_thread is None or not self._prewarm_thread.is_alive():
@@ -713,24 +1100,57 @@ class ModernPianoBackend(LiveBackendBase):
                     self._pending_prewarm = None
                     if pending is None:
                         self._prewarm_thread = None
+                        self._prewarm_stage = 'idle'
+                        self._prewarm_target_key = None
                         return
                     target_key, analysis_obj = pending
                     self._prewarm_target_key = target_key
+                    self._prewarm_stage = 'fast'
+                    fast_ready = self._has_fast_cache(target_key)
+                    full_ready = self._has_full_cache(target_key)
                 try:
-                    actions = self._build_actions(analysis_obj.notes, analysis_obj.pedal_events)
-                    action_times = [a.t for a in actions]
+                    if not fast_ready:
+                        disk_fast = self._load_disk_actions(analysis_obj, "fast")
+                        if disk_fast is not None:
+                            fast_actions, fast_action_times = disk_fast
+                        else:
+                            fast_actions = self._build_actions(analysis_obj.notes, analysis_obj.pedal_events, fast_mode=True, analysis=analysis_obj)
+                            fast_action_times = [a.t for a in fast_actions]
+                            self._save_disk_actions(analysis_obj, "fast", fast_actions, fast_action_times)
+                        with self._cache_lock:
+                            if self._current_action_cache_key() == target_key:
+                                self._fast_actions_cache = fast_actions
+                                self._fast_action_times_cache = fast_action_times
+                                self._fast_actions_cache_key = target_key
+                    with self._cache_lock:
+                        if self._pending_prewarm is not None and self._pending_prewarm[0] != target_key:
+                            self._prewarm_stage = 'idle'
+                            self._prewarm_target_key = None
+                            continue
+                        self._prewarm_stage = 'full'
+                    if not full_ready:
+                        disk_full = self._load_disk_actions(analysis_obj, "full")
+                        if disk_full is not None:
+                            actions, action_times = disk_full
+                        else:
+                            actions = self._build_actions(analysis_obj.notes, analysis_obj.pedal_events, fast_mode=False, analysis=analysis_obj)
+                            action_times = [a.t for a in actions]
+                            self._save_disk_actions(analysis_obj, "full", actions, action_times)
+                        with self._cache_lock:
+                            if self._current_action_cache_key() == target_key:
+                                self._actions_cache = actions
+                                self._action_times_cache = action_times
+                                self._actions_cache_key = target_key
+                    with self._cache_lock:
+                        if self._prewarm_target_key == target_key:
+                            self._prewarm_target_key = None
+                            self._prewarm_stage = 'idle'
                 except Exception:
                     with self._cache_lock:
                         if self._prewarm_target_key == target_key:
                             self._prewarm_target_key = None
+                            self._prewarm_stage = 'idle'
                     continue
-                with self._cache_lock:
-                    if self._current_action_cache_key() == target_key:
-                        self._actions_cache = actions
-                        self._action_times_cache = action_times
-                        self._actions_cache_key = target_key
-                    if self._prewarm_target_key == target_key:
-                        self._prewarm_target_key = None
 
         thread = threading.Thread(target=worker, daemon=True, name='PianoActionPrewarm')
         with self._cache_lock:
@@ -740,19 +1160,27 @@ class ModernPianoBackend(LiveBackendBase):
     def _run_from_position(self, handle: BackendPlaybackHandle, position_sec: float, stop_event: threading.Event, run_id: int) -> None:
         if not self.analysis:
             return
-        actions = self._ensure_action_cache()
+        cache_key = self._current_action_cache_key()
+        if handle.actions_snapshot is None or handle.action_times_snapshot is None or handle.prepared_cache_key != cache_key:
+            self._bind_handle_snapshot(handle, self.analysis)
+        actions = list(handle.actions_snapshot) if handle.actions_snapshot is not None else self._ensure_action_cache()
         if not actions:
             return
-        action_times = self._get_cached_action_times() or [a.t for a in actions]
+        action_times = list(handle.action_times_snapshot) if handle.action_times_snapshot is not None else (self._get_cached_action_times() or [a.t for a in actions])
+        if handle.actions_snapshot is None or handle.action_times_snapshot is None:
+            handle.actions_snapshot = list(actions)
+            handle.action_times_snapshot = list(action_times)
+            handle.prepared_cache_key = cache_key
+            handle.playback_plan_kind = "full" if self._has_full_cache(cache_key) else "fast"
 
         start_offset = self._offset_at_position(actions, position_sec)
         start_pedal = self._pedal_at_position(actions, position_sec)
-        if handle.nav_offset != start_offset:
+        if handle.nav_offset != start_offset or (handle.nav_offset == start_offset == 0 and self.instrument_mode == "bass" and handle.coarse_steps != 0):
             self._release_all(handle)
             self._move_handle_to_offset(handle, start_offset, self.nav_tap_hold)
             self._log(f"切换可弹区间到 {self._offset_label(handle.nav_offset)}，从 {position_sec:.2f}s 开始。", debug=True)
-        if self.use_pedal:
-            self._set_pedal_state(handle, start_pedal, self.pedal_tap_time)
+        if self.pure_mode or self.use_pedal or self.force_pedal_mode != "关闭":
+            self._set_pedal_state(handle, start_pedal, self._pedal_action_tap_hold())
 
         start_index = bisect.bisect_left(action_times, max(0.0, position_sec - 0.01))
         actions = actions[start_index:]
@@ -780,7 +1208,7 @@ class ModernPianoBackend(LiveBackendBase):
                     held_keys.pop(key, None)
 
         try:
-            self._log(f"钢琴/吉他/贝斯开始播放：{position_sec:.3f}s")
+            self._log(f"钢琴/吉他/贝斯开始播放：{position_sec:.3f}s", debug=True)
             self._log(
                 f"钢琴/吉他/贝斯播放开始 | 起点={position_sec:.3f}s | 音符={len(self.analysis.notes) if self.analysis else 0} | 动作={len(actions)} | "
                 f"keymap={len(self.keymap)} | 窗口={self.base_leftmost}-{self.window_rightmost} | "
@@ -810,10 +1238,9 @@ class ModernPianoBackend(LiveBackendBase):
                     key_primary_token.clear()
                     key_active_tokens.clear()
                     token_meta.clear()
-                    target_fine, target_coarse = self._offset_to_state(action.target_offset)
-                    path = self._state_to_nav_path(handle.fine_mode, handle.coarse_steps, target_fine, target_coarse)
+                    path = self._state_to_nav_path(handle.fine_mode, handle.coarse_steps, action.target_offset)
                     for key_name, fine_mode, coarse_steps in path:
-                        self._tap(key_name, self.nav_tap_hold)
+                        self._tap_nav_key(key_name, self.nav_tap_hold)
                         self._set_handle_window(handle, fine_mode, coarse_steps)
                     if holdable_keys:
                         expire_at = time.perf_counter() + max(0.0, self.shift_hold_release_delay)
@@ -828,8 +1255,8 @@ class ModernPianoBackend(LiveBackendBase):
                             self._log(f"可弹区间 -> {action.label}", debug=True)
                     continue
                 if action.kind == "pedal":
-                    if self.use_pedal:
-                        self._set_pedal_state(handle, bool(action.pedal_state), self.pedal_tap_time)
+                    if self.pure_mode or self.use_pedal or self.force_pedal_mode != "关闭":
+                        self._set_pedal_state(handle, bool(action.pedal_state), self._pedal_action_tap_hold())
                     continue
                 active_tokens = key_active_tokens.setdefault(action.key, set())
                 if action.kind == "down":
@@ -927,10 +1354,256 @@ class ModernPianoBackend(LiveBackendBase):
                 self._finish_run(handle, stop_event, run_id)
             self._log('钢琴/吉他/贝斯播放线程结束。', debug=True)
 
-    def _build_actions(self, notes: Sequence[NoteSpan], pedal_events: Sequence[PedalEvent]) -> List[PianoAction]:
+    def _build_actions(self, notes: Sequence[NoteSpan], pedal_events: Sequence[PedalEvent], *, fast_mode: bool = False, analysis: Optional[MidiAnalysisResult] = None) -> List[PianoAction]:
         if not notes:
             return []
-        grouped = self._group_notes(notes)
+        grouped = self._group_notes(notes, analysis=analysis)
+        if self.pure_mode:
+            return self._build_actions_pure(grouped, pedal_events, analysis=analysis)
+        if not fast_mode:
+            return self._build_actions_from_grouped(grouped, pedal_events, analysis=analysis)
+        saved = {
+            'lookahead_groups': self.lookahead_groups,
+            'switch_margin': self.switch_margin,
+            'min_notes_between_switches': self.min_notes_between_switches,
+            'shift_weight': self.shift_weight,
+            'chord_priority': self.chord_priority,
+            'octave_avoid_collision': self.octave_avoid_collision,
+            'octave_preview_neighbors': self.octave_preview_neighbors,
+            'bar_aware_transpose': self.bar_aware_transpose,
+            'bar_transpose_scope': self.bar_transpose_scope,
+            'bar_transpose_threshold': self.bar_transpose_threshold,
+            'melody_priority': self.melody_priority,
+            'melody_keep_top': self.melody_keep_top,
+            'shift_hold_bass': self.shift_hold_bass,
+        }
+        try:
+            self.lookahead_groups = max(2, min(self.lookahead_groups, 4))
+            self.switch_margin = min(self.switch_margin, 1)
+            if self.instrument_mode in {"guitar", "bass"} or self.fixed_window_mode:
+                self.min_notes_between_switches = 0
+            elif self.min_notes_between_switches <= 0:
+                self.min_notes_between_switches = 0
+            else:
+                self.min_notes_between_switches = max(2, min(self.min_notes_between_switches, 8))
+            self.shift_weight = max(1.0, min(self.shift_weight, 1.15))
+            self.chord_priority = False
+            self.octave_avoid_collision = False
+            self.octave_preview_neighbors = 0
+            self.bar_aware_transpose = False
+            self.bar_transpose_scope = 'phrase'
+            self.bar_transpose_threshold = 2
+            self.melody_priority = True
+            self.melody_keep_top = 1
+            self.shift_hold_bass = bool(saved['shift_hold_bass'])
+            return self._build_actions_from_grouped(grouped, pedal_events, analysis=analysis)
+        finally:
+            for key, value in saved.items():
+                setattr(self, key, value)
+
+    def _pure_group_threshold_sec(self) -> float:
+        return 0.001
+
+    def _build_pure_start_groups(self, notes: Sequence[NoteSpan]) -> List[List[NoteSpan]]:
+        ordered = sorted(notes, key=lambda n: (float(n.start_sec), int(n.track_index), int(getattr(n, 'channel', 0)), int(n.midi_note), -int(n.velocity)))
+        if not ordered:
+            return []
+        threshold = self._pure_group_threshold_sec()
+        groups: List[List[NoteSpan]] = []
+        for note in ordered:
+            note_start = float(note.start_sec)
+            if not groups or note_start - float(groups[-1][0].start_sec) > threshold:
+                groups.append([note])
+            else:
+                groups[-1].append(note)
+        return groups
+
+    def _pure_source_end_sec(self, note: NoteSpan) -> float:
+        if bool(getattr(note, 'has_raw_note_off', False)):
+            raw_end = float(getattr(note, 'raw_end_sec', 0.0) or 0.0)
+            if raw_end > float(note.start_sec):
+                return raw_end
+        return float(note.end_sec)
+
+    def _pure_release_at(self, note: NoteSpan) -> float:
+        start_sec = float(note.start_sec)
+        edge_end_sec = max(start_sec, self._pure_source_end_sec(note))
+        release_advance = self.high_freq_release_advance if self.high_freq_compat else 0.0
+        if release_advance > 0.0:
+            release_at = min(edge_end_sec, max(start_sec + 0.003, edge_end_sec - release_advance))
+        else:
+            release_at = edge_end_sec
+        return max(start_sec + 0.003, release_at)
+
+    def _pure_direct_min_gap(self) -> float:
+        base_gap = max(0.0, float(getattr(self, 'retrigger_gap', 0.0) or 0.0))
+        compat_gap = float(self.high_freq_release_advance) if self.high_freq_compat else 0.0
+        return max(base_gap, compat_gap)
+
+    def _pure_direct_candidates_for_group(self, group: Sequence[NoteSpan], allowed_offsets: Sequence[int]) -> List[int]:
+        candidates: List[int] = []
+        for offset in allowed_offsets:
+            if any(self._note_in_window(int(note.midi_note), int(offset)) for note in group):
+                candidates.append(int(offset))
+        return candidates or [int(offset) for offset in allowed_offsets]
+
+    def _pure_direct_forward_hits(
+        self,
+        start_groups: Sequence[Sequence[NoteSpan]],
+        group_index: int,
+        offset: int,
+        *,
+        note_budget: int = 32,
+        time_horizon_sec: float = 1.25,
+    ) -> int:
+        if not start_groups:
+            return 0
+        base_time = float(start_groups[group_index][0].start_sec)
+        hits = 0
+        consumed = 0
+        for future_group in start_groups[group_index + 1 : ]:
+            if not future_group:
+                continue
+            if float(future_group[0].start_sec) - base_time > time_horizon_sec:
+                break
+            for future_note in future_group:
+                consumed += 1
+                if consumed > note_budget:
+                    return hits
+                if self._note_in_window(int(future_note.midi_note), int(offset)):
+                    hits += 1
+                else:
+                    return hits
+        return hits
+
+    def _choose_pure_direct_offset(
+        self,
+        start_groups: Sequence[Sequence[NoteSpan]],
+        group_index: int,
+        current_offset: int,
+        allowed_offsets: Sequence[int],
+    ) -> int:
+        if not start_groups or not allowed_offsets:
+            return int(current_offset)
+        group = list(start_groups[group_index])
+        if not group:
+            return int(current_offset)
+        if current_offset in allowed_offsets and all(self._note_in_window(int(note.midi_note), int(current_offset)) for note in group):
+            return int(current_offset)
+
+        candidates = self._pure_direct_candidates_for_group(group, allowed_offsets)
+        current_hits = sum(1 for note in group if self._note_in_window(int(note.midi_note), int(current_offset))) if current_offset in allowed_offsets else -1
+        best_offset = int(current_offset if current_offset in allowed_offsets else candidates[0])
+        best_score: Optional[tuple[int, int, int, float]] = None
+        group_center = sum(float(note.midi_note) for note in group) / max(1, len(group))
+        for offset in candidates:
+            current_group_hits = sum(1 for note in group if self._note_in_window(int(note.midi_note), int(offset)))
+            if current_group_hits <= 0:
+                continue
+            forward_hits = self._pure_direct_forward_hits(start_groups, group_index, int(offset))
+            playable_left, playable_right = self._effective_playable_bounds(int(offset))
+            center_distance = abs(((playable_left + playable_right) / 2.0) - group_center)
+            nav_distance = abs(int(offset) - int(current_offset))
+            score = (current_group_hits, forward_hits, -nav_distance, -center_distance)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_offset = int(offset)
+        if best_score is None:
+            return int(current_offset)
+        if current_offset in allowed_offsets and best_score[0] <= current_hits:
+            return int(current_offset)
+        return int(best_offset)
+
+    def _postprocess_pure_direct_actions(self, actions: Sequence[PianoAction]) -> List[PianoAction]:
+        if not actions:
+            return []
+        min_gap = self._pure_direct_min_gap()
+        key_down_times: dict[str, float] = {}
+        key_last_up: dict[str, PianoAction] = {}
+        ordered = list(actions)
+        priority = {"up": 0, "pedal": 1, "nav": 2, "down": 3}
+        ordered.sort(key=lambda a: (float(a.t), priority.get(a.kind, 9), a.key, a.note_token))
+        for action in ordered:
+            if action.kind == 'down':
+                prev_up = key_last_up.get(action.key)
+                prev_down_t = key_down_times.get(action.key)
+                if prev_up is not None and prev_down_t is not None and min_gap > 0.0:
+                    gap = float(action.t) - float(prev_up.t)
+                    if gap < min_gap:
+                        prev_up.t = max(float(prev_down_t) + 0.001, float(action.t) - min_gap)
+                key_down_times[action.key] = float(action.t)
+            elif action.kind == 'up':
+                key_last_up[action.key] = action
+        ordered.sort(key=lambda a: (float(a.t), priority.get(a.kind, 9), a.key, a.note_token))
+        return ordered
+
+    def _build_actions_pure(self, grouped: Sequence[Sequence[NoteSpan]], pedal_events: Sequence[PedalEvent], *, analysis: Optional[MidiAnalysisResult] = None) -> List[PianoAction]:
+        actions: List[PianoAction] = []
+        source_notes = list(getattr(analysis, 'notes', ()) or ()) if analysis is not None else [note for group in grouped for note in group]
+        if not source_notes:
+            return actions
+
+        filtered_notes = [
+            note for note in source_notes
+            if DEFAULT_OVERALL_MIN <= int(note.midi_note) <= DEFAULT_OVERALL_MAX
+        ]
+        if not filtered_notes:
+            return actions
+
+        start_groups = self._build_pure_start_groups(filtered_notes)
+        if not start_groups:
+            return actions
+
+        allowed_offsets = self._allowed_offsets()
+        current_offset = 0 if 0 in allowed_offsets else int(allowed_offsets[0])
+        note_token = 0
+        for group_index, group in enumerate(start_groups):
+            if not group:
+                continue
+            ordered_group = sorted(group, key=lambda n: (float(n.start_sec), int(n.track_index), int(getattr(n, 'channel', 0)), int(n.midi_note), -int(n.velocity)))
+            group_start = float(ordered_group[0].start_sec)
+            if any(not self._note_in_window(int(note.midi_note), int(current_offset)) for note in ordered_group):
+                target_offset = self._choose_pure_direct_offset(start_groups, group_index, current_offset, allowed_offsets)
+                if target_offset != current_offset:
+                    cur_fine, cur_coarse = self._offset_to_state(current_offset)
+                    nav_path = self._state_to_nav_path(cur_fine, cur_coarse, target_offset)
+                    if nav_path:
+                        nav_times = self._nav_path_relative_times(nav_path, self.nav_tap_hold)
+                        nav_span = nav_times[-1] if nav_times else 0.0
+                        nav_start = max(0.0, group_start - self.nav_settle_sec - nav_span)
+                        for nav_t_rel, (_nav_key, fine_mode, coarse_steps) in zip(nav_times, nav_path):
+                            next_offset = self._state_to_offset(fine_mode, coarse_steps)
+                            nav_t = nav_start + nav_t_rel
+                            actions.append(PianoAction(t=nav_t, kind='nav', key='', target_offset=next_offset, label=self._offset_label(next_offset)))
+                        current_offset = target_offset
+            for note in ordered_group:
+                midi_note = int(note.midi_note)
+                if not self._note_in_window(midi_note, int(current_offset)):
+                    continue
+                key_index = midi_note - self._window_left(int(current_offset))
+                if not (0 <= key_index < len(self.keymap)):
+                    continue
+                key = self.keymap[key_index]
+                actions.append(PianoAction(t=float(note.start_sec), kind='down', key=key, target_offset=int(current_offset), note_token=note_token, midi_note=midi_note, chord_rank=0))
+                actions.append(PianoAction(t=self._pure_release_at(note), kind='up', key=key, target_offset=int(current_offset), note_token=note_token, midi_note=midi_note, chord_rank=0))
+                note_token += 1
+
+        use_raw_pedal = True
+        pedal_enabled = use_raw_pedal or self.force_pedal_mode != '关闭'
+        if pedal_enabled:
+            effective_pedals = list(pedal_events) if use_raw_pedal else []
+            if self.force_pedal_mode != '关闭':
+                effective_pedals = self._build_forced_pedal_events(analysis or self.analysis, start_groups)
+            last_pedal_state: Optional[bool] = None
+            for pedal in sorted(effective_pedals, key=lambda p: (float(p.time_sec), int(p.track_index))):
+                state = bool(pedal.is_down)
+                if last_pedal_state is None or last_pedal_state != state:
+                    actions.append(PianoAction(t=float(pedal.time_sec), kind='pedal', key='', pedal_state=state, label='踏板'))
+                    last_pedal_state = state
+
+        return self._postprocess_pure_direct_actions(actions)
+
+    def _build_actions_from_grouped(self, grouped: Sequence[Sequence[NoteSpan]], pedal_events: Sequence[PedalEvent], *, analysis: Optional[MidiAnalysisResult] = None) -> List[PianoAction]:
         actions: List[PianoAction] = []
         allowed_offsets = self._allowed_offsets()
         current_offset = 0 if 0 in allowed_offsets else allowed_offsets[0]
@@ -939,6 +1612,8 @@ class ModernPianoBackend(LiveBackendBase):
         note_token = 0
         prev_melody_note: Optional[int] = None
         for group_index, group in enumerate(grouped):
+            if not group:
+                continue
             group_start = group[0].start_sec
             target_offset = self._choose_best_offset(
                 grouped,
@@ -948,22 +1623,15 @@ class ModernPianoBackend(LiveBackendBase):
                 notes_since_switch=max(0, processed_note_count - last_switch_note_index),
             )
             cur_fine, cur_coarse = self._offset_to_state(current_offset)
-            tar_fine, tar_coarse = self._offset_to_state(target_offset)
-            nav_path = self._state_to_nav_path(cur_fine, cur_coarse, tar_fine, tar_coarse)
+            nav_path = self._state_to_nav_path(cur_fine, cur_coarse, target_offset)
             if nav_path:
-                nav_start = max(0.0, group_start - self.nav_settle_sec - self.nav_step_gap * max(0, len(nav_path) - 1))
-                for nav_index, (_nav_key, fine_mode, coarse_steps) in enumerate(nav_path):
+                nav_times = self._nav_path_relative_times(nav_path, self.nav_tap_hold)
+                nav_span = nav_times[-1] if nav_times else 0.0
+                nav_start = max(0.0, group_start - self.nav_settle_sec - nav_span)
+                for nav_t_rel, (_nav_key, fine_mode, coarse_steps) in zip(nav_times, nav_path):
                     next_offset = self._state_to_offset(fine_mode, coarse_steps)
-                    nav_t = nav_start + nav_index * self.nav_step_gap
-                    actions.append(
-                        PianoAction(
-                            t=nav_t,
-                            kind="nav",
-                            key="",
-                            target_offset=next_offset,
-                            label=self._offset_label(next_offset),
-                        )
-                    )
+                    nav_t = nav_start + nav_t_rel
+                    actions.append(PianoAction(t=nav_t, kind="nav", key="", target_offset=next_offset, label=self._offset_label(next_offset)))
                 current_offset = target_offset
                 last_switch_note_index = processed_note_count
 
@@ -995,9 +1663,13 @@ class ModernPianoBackend(LiveBackendBase):
                 prev_melody_note = mapped_melody
             processed_note_count += len(group)
 
-        if self.use_pedal:
+        pedal_enabled = self.use_pedal or self.force_pedal_mode != "关闭"
+        if pedal_enabled:
+            effective_pedals = list(pedal_events)
+            if self.force_pedal_mode != "关闭":
+                effective_pedals = self._build_forced_pedal_events(analysis or self.analysis, grouped)
             last_pedal_state: Optional[bool] = None
-            for pedal in sorted(pedal_events, key=lambda p: (p.time_sec, p.track_index)):
+            for pedal in sorted(effective_pedals, key=lambda p: (p.time_sec, p.track_index)):
                 if last_pedal_state is None or last_pedal_state != bool(pedal.is_down):
                     actions.append(PianoAction(t=pedal.time_sec, kind="pedal", key="", pedal_state=bool(pedal.is_down), label="踏板"))
                     last_pedal_state = bool(pedal.is_down)
@@ -1006,10 +1678,57 @@ class ModernPianoBackend(LiveBackendBase):
         actions.sort(key=lambda a: (a.t, priority.get(a.kind, 9), a.key))
         return actions
 
-    def _group_notes(self, notes: Sequence[NoteSpan]) -> List[List[NoteSpan]]:
-        ordered = sorted(notes, key=lambda n: (n.start_sec, n.midi_note, n.track_index))
+    def _forced_pedal_markers(self, analysis: Optional[MidiAnalysisResult]) -> tuple[float, ...]:
+        if analysis is None:
+            return ()
+        mode = str(getattr(self, "force_pedal_mode", "关闭") or "关闭").strip()
+        if mode == "半拍":
+            return tuple(getattr(analysis, "half_beat_markers_sec", ()) or ())
+        if mode == "整拍":
+            return tuple(getattr(analysis, "beat_markers_sec", ()) or ())
+        if mode == "半小节":
+            return tuple(getattr(analysis, "half_bar_markers_sec", ()) or ())
+        if mode == "整小节":
+            return tuple(getattr(analysis, "bar_markers_sec", ()) or ())
+        return ()
+
+    def _build_forced_pedal_events(self, analysis: Optional[MidiAnalysisResult], grouped: Sequence[Sequence[NoteSpan]]) -> List[PedalEvent]:
+        if analysis is None or not grouped:
+            return []
+        markers = self._forced_pedal_markers(analysis)
+        if not markers:
+            return []
+        first_note_time = max(0.0, float(grouped[0][0].start_sec)) if grouped and grouped[0] else 0.0
+        repress_gap = max(0.003, float(getattr(self, "force_pedal_repress_gap", 0.07) or 0.07))
+        duration = max(first_note_time, float(getattr(analysis, "duration_sec", 0.0) or 0.0))
+        # 强制踏板：在目标边界前关闭，并在边界时刻重新开启。
+        events: List[PedalEvent] = [PedalEvent(track_index=-1, time_sec=0.0, is_down=True)]
+        for marker in markers:
+            t = float(marker)
+            if t <= first_note_time + 1e-6 or t >= duration - 1e-6:
+                continue
+            off_time = max(first_note_time, t - repress_gap)
+            if off_time <= first_note_time + 1e-6:
+                continue
+            if off_time >= t - 1e-6:
+                continue
+            events.append(PedalEvent(track_index=-1, time_sec=off_time, is_down=False))
+            events.append(PedalEvent(track_index=-1, time_sec=t, is_down=True))
+        return events
+
+    def _group_notes(self, notes: Sequence[NoteSpan], analysis: Optional[MidiAnalysisResult] = None) -> List[List[NoteSpan]]:
+        if self.pure_mode:
+            # 纯净直出模式下，仅保留兼容分组。
+            threshold = self._pure_group_threshold_sec()
+        else:
+            threshold = max(0.0, self.chord_split_threshold)
+        if analysis is not None and not self.pure_mode:
+            cached_threshold = float(getattr(analysis, 'group_threshold_sec', 0.035) or 0.035)
+            cached_groups = getattr(analysis, 'grouped_notes_default', ()) or ()
+            if cached_groups and abs(threshold - cached_threshold) <= 1e-9:
+                return [list(group) for group in cached_groups]
+        ordered = sorted(notes, key=lambda n: (n.start_sec, n.track_index, n.midi_note))
         groups: List[List[NoteSpan]] = []
-        threshold = max(0.0, self.chord_split_threshold)
         for note in ordered:
             if not groups or note.start_sec - groups[-1][0].start_sec > threshold:
                 groups.append([note])
@@ -1095,10 +1814,25 @@ class ModernPianoBackend(LiveBackendBase):
             return 0
         search_offsets = self._allowed_offsets()
         best_offset = current_offset if current_offset in search_offsets else search_offsets[0]
+
+        # 新逻辑：能弹就弹，不能弹才移动八度
+        # 检查当前八度是否能弹奏当前组的所有音符
+        if current_offset in search_offsets:
+            current_left, current_right = self._effective_playable_bounds(current_offset)
+            current_group = groups[group_index]
+            can_play_all_in_current = all(
+                current_left <= note.midi_note <= current_right
+                for note in current_group
+            )
+            if can_play_all_in_current:
+                return current_offset
+
+        # 如果当前八度不能弹奏所有音符，才寻找最佳八度
         best_score: Optional[Tuple[float, float, float, float, float, float]] = None
         preview_groups = max(self.lookahead_groups, self.octave_preview_neighbors) if self.octave_preview_neighbors > 0 else self.lookahead_groups
         future_groups = groups[group_index : min(len(groups), group_index + preview_groups)]
         segment_groups = future_groups[: self._scope_group_count()]
+
         for offset in search_offsets:
             total_direct = 0.0
             total_penalty = 0.0
@@ -1110,7 +1844,7 @@ class ModernPianoBackend(LiveBackendBase):
                 total_penalty += penalty * group_weight
             local_bonus = self._local_transpose_bonus(segment_groups, current_offset, offset)
             nav_cost = abs(offset - current_offset)
-            center_cost = abs((self._window_left(offset) + self._window_right(offset)) / 2.0 - self._group_center(groups[group_index]))
+            center_cost = abs((self._playable_window_left(offset) + self._playable_window_right(offset)) / 2.0 - self._group_center(groups[group_index]))
             target_fine, _target_coarse = self._offset_to_state(offset)
             shift_multiplier = self.shift_weight if target_fine == "shift" else 1.0
             total_value = (total_direct - total_penalty + local_bonus) * shift_multiplier
@@ -1119,29 +1853,15 @@ class ModernPianoBackend(LiveBackendBase):
                 best_score = score
                 best_offset = offset
 
-        cur_direct, cur_penalty, _ = self._evaluate_group_window(groups[group_index], current_offset, prev_melody_note)
-        current_total = cur_direct - cur_penalty
-        if current_offset in search_offsets:
-            current_fine, _current_coarse = self._offset_to_state(current_offset)
-            if current_fine == "shift":
-                current_total *= self.shift_weight
-
-        if best_offset != current_offset and best_score is not None:
-            required_gain = 0.15 + self.switch_margin * 0.35
-            if notes_since_switch < self.min_notes_between_switches:
-                cooldown_ratio = 1.0 - (notes_since_switch / max(1, self.min_notes_between_switches))
-                required_gain += 0.60 * cooldown_ratio
-            if best_score[0] <= current_total + required_gain:
-                best_offset = current_offset
         return best_offset
 
     def _local_transpose_bonus(self, segment_groups: Sequence[Sequence[NoteSpan]], current_offset: int, offset: int) -> float:
         if not self.bar_aware_transpose or not segment_groups:
             return 0.0
-        current_hi = sum(1 for group in segment_groups for note in group if note.midi_note > self._window_right(current_offset))
-        current_lo = sum(1 for group in segment_groups for note in group if note.midi_note < self._window_left(current_offset))
-        candidate_hi = sum(1 for group in segment_groups for note in group if note.midi_note > self._window_right(offset))
-        candidate_lo = sum(1 for group in segment_groups for note in group if note.midi_note < self._window_left(offset))
+        current_hi = sum(1 for group in segment_groups for note in group if note.midi_note > self._playable_window_right(current_offset))
+        current_lo = sum(1 for group in segment_groups for note in group if note.midi_note < self._playable_window_left(current_offset))
+        candidate_hi = sum(1 for group in segment_groups for note in group if note.midi_note > self._playable_window_right(offset))
+        candidate_lo = sum(1 for group in segment_groups for note in group if note.midi_note < self._playable_window_left(offset))
         bonus = 0.0
         if current_hi >= self.bar_transpose_threshold:
             bonus += max(0, current_hi - candidate_hi) * 1.6
@@ -1211,7 +1931,7 @@ class ModernPianoBackend(LiveBackendBase):
 
     def _group_center(self, group: Sequence[NoteSpan]) -> float:
         if not group:
-            return float(self.base_leftmost)
+            return float(self._playable_window_left(0))
         return sum(note.midi_note for note in group) / len(group)
 
     def _window_left(self, offset: int) -> int:
@@ -1220,46 +1940,69 @@ class ModernPianoBackend(LiveBackendBase):
     def _window_right(self, offset: int) -> int:
         return self.window_rightmost + offset * 12
 
+    def _playable_window_left(self, offset: int) -> int:
+        left = self._window_left(offset)
+        if self.instrument_mode == "bass":
+            left += BASS_PLAYABLE_START_OFFSET
+        return left
+
+    def _playable_window_right(self, offset: int) -> int:
+        if self.instrument_mode == "bass":
+            return self._playable_window_left(offset) + BASS_PLAYABLE_COUNT - 1
+        return self._window_right(offset)
+
+    def _effective_playable_bounds(self, offset: int) -> Tuple[int, int]:
+        left = max(self._playable_window_left(offset), self.overall_min_note)
+        right = min(self._playable_window_right(offset), self.overall_max_note)
+        return left, right
+
     def _note_in_window(self, note: int, offset: int) -> bool:
-        left = max(self._window_left(offset), self.overall_min_note)
-        right = min(self._window_right(offset), self.overall_max_note)
+        left, right = self._effective_playable_bounds(offset)
         return left <= note <= right
 
     def _map_note_with_meta(self, note: int, offset: int, prev_note: Optional[int] = None) -> Tuple[Optional[int], float, float]:
-        left = max(self._window_left(offset), self.overall_min_note)
-        right = min(self._window_right(offset), self.overall_max_note)
+        left, right = self._effective_playable_bounds(offset)
         if left > right:
             return None, 99.0, 0.0
-        if left <= note <= right:
+        bass_mode = self.instrument_mode == "bass"
+        direct_in_range = left <= note <= right
+        if direct_in_range:
             jump_excess = 0.0
             if prev_note is not None and self.max_melodic_jump_after_fold > 0:
                 jump_excess = max(0.0, abs(note - prev_note) - self.max_melodic_jump_after_fold)
             return note, 0.0, jump_excess
-        if not self.auto_transpose and not self.octave_fold_priority:
+        if not direct_in_range and not self.auto_transpose and not self.octave_fold_priority:
             return None, 99.0, 0.0
-        if not self.octave_fold_priority:
+        if not self.octave_fold_priority and not direct_in_range:
             return None, 99.0, 0.0
         candidates: List[int] = []
         for k in range(-6, 7):
             candidate = note + 12 * k
             if left <= candidate <= right:
                 candidates.append(candidate)
+        if direct_in_range and note not in candidates:
+            candidates.append(note)
         if not candidates:
             return None, 99.0, 0.0
         best: Optional[Tuple[float, float, int, float]] = None
+        bass_preferred_top = min(right, left + 11)
         for candidate in candidates:
             fold_distance = abs(candidate - note) / 12.0
             jump_excess = 0.0
             if prev_note is not None and self.max_melodic_jump_after_fold > 0:
                 jump_excess = max(0.0, abs(candidate - prev_note) - self.max_melodic_jump_after_fold)
+            bass_upper_bias = 0.0
+            if bass_mode:
+                bass_upper_bias = max(0.0, candidate - bass_preferred_top) / 12.0 * 0.9
             score = (
-                fold_distance * max(0.2, self.octave_fold_weight) + jump_excess * 0.6,
+                fold_distance * max(0.2, self.octave_fold_weight) + jump_excess * 0.6 + bass_upper_bias,
+                bass_upper_bias,
                 abs(candidate - note),
                 abs(candidate - (prev_note if prev_note is not None else note)),
                 jump_excess,
             )
             if best is None or score < best:
-                best = (score[0], score[1], candidate, jump_excess)
+                best = (score[0], score[2], candidate, jump_excess)
         if best is None:
             return None, 99.0, 0.0
         return int(best[2]), abs(int(best[2]) - note) / 12.0, float(best[3])
@@ -1269,8 +2012,9 @@ class ModernPianoBackend(LiveBackendBase):
         return mapped
 
     def _offset_label(self, offset: int) -> str:
-        left = max(self._window_left(offset), self.overall_min_note)
-        right = min(self._window_right(offset), self.overall_max_note)
+        left, right = self._effective_playable_bounds(offset)
+        if left > right:
+            return "不可用"
         return f"{_note_name(left)}-{_note_name(right)}"
 
     @staticmethod
@@ -1308,6 +2052,7 @@ class DrumHit:
 
 
 class ModernDrumBackend(LiveBackendBase):
+    DRUM_MAPPING_VERSION = 3
     KEY_NAMES = {
         "F": "Bass Drum",
         "Q": "Snare Drum",
@@ -1319,19 +2064,23 @@ class ModernDrumBackend(LiveBackendBase):
         "S": "Pedal Hi-Hat",
         "H": "Floor Tom",
     }
-    KEY_PRIORITY = {"F": 0, "Q": 1, "T": 2, "S": 3, "R": 4, "Y": 5, "E": 6, "W": 7, "H": 8}
+    KEY_PRIORITY = {"F": 0, "Q": 1, "S": 2, "T": 3, "R": 4, "Y": 5, "E": 6, "W": 7, "H": 8}
+    CLOSED_HIHAT_NOTES = frozenset({22, 42})
+    PEDAL_HIHAT_NOTES = frozenset({44})
+    OPEN_HIHAT_NOTES = frozenset({23, 24, 25, 26, 46})
+    HAT_NOTES = frozenset(set(CLOSED_HIHAT_NOTES) | set(PEDAL_HIHAT_NOTES) | set(OPEN_HIHAT_NOTES))
     PRIMARY_MAP = {
         35: "F", 36: "F",
         37: "Q", 38: "Q", 39: "Q", 40: "Q",
         41: "H", 43: "H",
         45: "W", 47: "W", 48: "W",
         50: "E", 58: "E",
-        44: "S",
-        42: "T", 46: "T",
+        42: "S", 44: "S", 46: "T",
         49: "R", 52: "R", 55: "R", 57: "R",
         51: "Y", 53: "Y", 59: "Y",
     }
     EXTENDED_MAP = {
+        22: "S", 23: "S", 24: "S", 25: "T", 26: "T",
         27: "F", 28: "Q", 29: "Q", 30: "Q", 31: "Q", 32: "Q", 33: "Q", 34: "Q",
         54: "Y", 56: "R", 60: "Y", 61: "Y", 62: "W", 63: "E", 64: "E", 65: "W", 66: "H",
         67: "S", 68: "Q", 69: "Y", 70: "Y", 71: "R", 72: "Q", 73: "Q", 74: "T", 75: "Y",
@@ -1352,6 +2101,10 @@ class ModernDrumBackend(LiveBackendBase):
 
     @classmethod
     def drum_key_for_midi(cls, note: int) -> Optional[str]:
+        if note in cls.PEDAL_HIHAT_NOTES or note in cls.CLOSED_HIHAT_NOTES:
+            return "S"
+        if note in cls.OPEN_HIHAT_NOTES:
+            return "T"
         return cls.PRIMARY_MAP.get(note) or cls.EXTENDED_MAP.get(note) or cls._fallback_key_for_note(note)
 
     @classmethod
@@ -1366,9 +2119,9 @@ class ModernDrumBackend(LiveBackendBase):
             return "F"
         if note <= 40:
             return "Q"
-        if note == 44:
+        if note in {42, 44}:
             return "S"
-        if note in {42, 46, 74}:
+        if note in {46, 74}:
             return "T"
         if 41 <= note <= 43:
             return "H"
@@ -1396,6 +2149,11 @@ class ModernDrumBackend(LiveBackendBase):
         self.use_velocity_rules = True
         self.use_smart_keep = True
         self.prefer_channel_10 = True
+        self._config_signature: Optional[tuple] = None
+        self._hits_cache: Optional[List[DrumHit]] = None
+        self._hits_cache_key: Optional[tuple] = None
+        self._report_cache: Optional[DrumPlanReport] = None
+        self._report_cache_key: Optional[tuple] = None
 
     def update_config(self, config: dict) -> None:
         if self.configure_input_backend(config.get("INPUT_BACKEND", INPUT_BACKEND_DEFAULT)):
@@ -1417,10 +2175,69 @@ class ModernDrumBackend(LiveBackendBase):
         self.use_velocity_rules = bool(config.get("USE_VELOCITY_RULES", True))
         self.use_smart_keep = bool(config.get("USE_SMART_KEEP", True))
         self.prefer_channel_10 = bool(config.get("PREFER_CHANNEL_10", True))
+        new_signature = (
+            self.DRUM_MAPPING_VERSION,
+            self.retrigger_gap, self.max_simultaneous, self.base_tap_hold, self.same_time_window,
+            self.density_limit_hz, self.coarse_group_window, self.accent_velocity, self.ghost_velocity,
+            self.use_context_replace, self.use_velocity_rules, self.use_smart_keep, self.prefer_channel_10,
+        )
+        if self._config_signature is not None and new_signature != self._config_signature:
+            self.clear_runtime_caches()
+        self._config_signature = new_signature
+
+    def clear_runtime_caches(self) -> None:
+        self._hits_cache = None
+        self._hits_cache_key = None
+        self._report_cache = None
+        self._report_cache_key = None
+
+    def _cache_key_for_analysis(self, analysis: Optional[MidiAnalysisResult]) -> Optional[tuple]:
+        if analysis is None or self._config_signature is None:
+            return None
+        return (id(analysis), self._config_signature)
+
+    def _disk_cache_key(self, analysis: Optional[MidiAnalysisResult], kind: str) -> Optional[str]:
+        if analysis is None or self._config_signature is None:
+            return None
+        analysis_key = str(getattr(analysis, "analysis_cache_key", "") or getattr(analysis, "source_sha256", "") or "")
+        if not analysis_key:
+            return None
+        return make_key("drum_reports", {
+            "analysis": analysis_key,
+            "kind": str(kind),
+            "backend": "drum",
+            "config_signature": stable_hash_payload(self._config_signature),
+        })
+
+    def _load_disk_value(self, analysis: Optional[MidiAnalysisResult], kind: str):
+        key = self._disk_cache_key(analysis, kind)
+        if not key:
+            return None
+        return load_pickle("drum_reports", key)
+
+    def _save_disk_value(self, analysis: Optional[MidiAnalysisResult], kind: str, value) -> None:
+        key = self._disk_cache_key(analysis, kind)
+        if not key:
+            return
+        try:
+            save_pickle("drum_reports", key, value, meta={
+                "kind": str(kind),
+                "analysis": str(getattr(analysis, "analysis_cache_key", "") or getattr(analysis, "source_sha256", "") or ""),
+            })
+        except Exception:
+            pass
 
     def build_plan_report(self, analysis: Optional[MidiAnalysisResult]) -> DrumPlanReport:
         if analysis is None or not analysis.notes:
             return DrumPlanReport(selected_mode="未载入", total_source_hits=0, total_mapped_hits=0)
+        cache_key = self._cache_key_for_analysis(analysis)
+        if cache_key is not None and cache_key == self._report_cache_key and self._report_cache is not None:
+            return self._report_cache
+        cached = self._load_disk_value(analysis, "report")
+        if isinstance(cached, DrumPlanReport):
+            self._report_cache = cached
+            self._report_cache_key = cache_key
+            return cached
         ordered = sorted(analysis.notes, key=lambda n: (n.start_sec, -n.velocity, n.midi_note))
         note_counter: Counter[int] = Counter()
         mapped_counter: Counter[str] = Counter()
@@ -1449,9 +2266,9 @@ class ModernDrumBackend(LiveBackendBase):
             cluster_notes = [n.midi_note for n in group]
             for note in sorted(group, key=lambda n: (-n.velocity, n.midi_note)):
                 note_counter[note.midi_note] += 1
-                key, reason, kind = self._map_note_with_context_verbose(note.midi_note, cluster_notes, present_keys, history)
+                key, reason, kind = self._map_note_with_context_verbose(note, cluster_notes, present_keys, history)
                 if key:
-                    hit = DrumHit(t=note.start_sec, key=key, velocity=note.velocity, hold=self._hold_for_velocity(key, note.velocity), midi_note=note.midi_note, original_name=self.note_name_for_midi(note.midi_note), mapped_name=self.KEY_NAMES.get(key, key), reason=reason, mapping_kind=kind)
+                    hit = DrumHit(t=note.start_sec, key=key, velocity=note.velocity, hold=self._hold_for_note(key, note), midi_note=note.midi_note, original_name=self.note_name_for_midi(note.midi_note), mapped_name=self.KEY_NAMES.get(key, key), reason=reason, mapping_kind=kind)
                     candidate_hits.append(hit)
                     present_keys.add(key)
                     info = preview_map.setdefault(note.midi_note, [0, key, reason or self.KEY_NAMES.get(key, key)])
@@ -1479,7 +2296,7 @@ class ModernDrumBackend(LiveBackendBase):
         mode_parts = ["上下文替代" if self.use_context_replace else "基础映射", "智能保留" if self.use_smart_keep else "全保留", "力度规则" if self.use_velocity_rules else "固定时长"]
         if self.prefer_channel_10:
             mode_parts.append("鼓轨优先")
-        return DrumPlanReport(
+        report = DrumPlanReport(
             selected_mode=" / ".join(mode_parts),
             total_source_hits=total_source_hits,
             total_mapped_hits=total_mapped_hits,
@@ -1489,6 +2306,10 @@ class ModernDrumBackend(LiveBackendBase):
             ignored_counter=sorted(ignored_counter.items(), key=lambda kv: -kv[1])[:8],
             preview_rows=preview_rows,
         )
+        self._report_cache = report
+        self._report_cache_key = cache_key
+        self._save_disk_value(analysis, "report", report)
+        return report
 
     def _run_from_position(self, handle: BackendPlaybackHandle, position_sec: float, stop_event: threading.Event, run_id: int) -> None:
         if not self.analysis:
@@ -1500,7 +2321,7 @@ class ModernDrumBackend(LiveBackendBase):
         start_perf = time.perf_counter()
         anchor = position_sec
         last_status_at = 0.0
-        self._log(f"鼓开始播放：{position_sec:.3f}s")
+        self._log(f"鼓开始播放：{position_sec:.3f}s", debug=True)
         try:
             for hit in hits:
                 if stop_event.is_set():
@@ -1530,6 +2351,15 @@ class ModernDrumBackend(LiveBackendBase):
     def _build_hits(self, notes: Sequence[NoteSpan]) -> List[DrumHit]:
         if not notes:
             return []
+        analysis = self.analysis
+        cache_key = self._cache_key_for_analysis(analysis)
+        if cache_key is not None and cache_key == self._hits_cache_key and self._hits_cache is not None:
+            return list(self._hits_cache)
+        cached = self._load_disk_value(analysis, "hits") if analysis is not None else None
+        if isinstance(cached, list) and all(isinstance(item, DrumHit) for item in cached):
+            self._hits_cache = list(cached)
+            self._hits_cache_key = cache_key
+            return list(cached)
         ordered = sorted(notes, key=lambda n: (n.start_sec, -n.velocity, n.midi_note))
         groups: List[List[NoteSpan]] = []
         current: List[NoteSpan] = []
@@ -1554,42 +2384,75 @@ class ModernDrumBackend(LiveBackendBase):
                 history[:] = history[-12:]
                 hits.extend(cluster_hits)
         hits.sort(key=lambda h: (h.t, self.KEY_PRIORITY.get(h.key, 99), -h.velocity))
-        return self._density_limit(hits)
+        hits = self._density_limit(hits)
+        self._hits_cache = list(hits)
+        self._hits_cache_key = cache_key
+        if analysis is not None:
+            self._save_disk_value(analysis, "hits", hits)
+        return hits
 
     def _map_group_to_hits(self, group: Sequence[NoteSpan], history: Sequence[str]) -> List[DrumHit]:
         mapped: List[DrumHit] = []
         cluster_notes = [n.midi_note for n in group]
         present_keys: set[str] = set()
         for note in sorted(group, key=lambda n: (-n.velocity, n.midi_note)):
-            key, reason, kind = self._map_note_with_context_verbose(note.midi_note, cluster_notes, present_keys, history)
+            key, reason, kind = self._map_note_with_context_verbose(note, cluster_notes, present_keys, history)
             if not key:
                 continue
-            hold = self._hold_for_velocity(key, note.velocity)
+            hold = self._hold_for_note(key, note)
             mapped.append(DrumHit(t=note.start_sec, key=key, velocity=note.velocity, hold=hold, midi_note=note.midi_note, original_name=self.note_name_for_midi(note.midi_note), mapped_name=self.KEY_NAMES.get(key, key), reason=reason, mapping_kind=kind))
             present_keys.add(key)
         return self._smart_keep(mapped)
 
-    def _map_note_with_context_verbose(self, note: int, cluster_notes: Sequence[int], present_keys: set[str], history: Sequence[str]) -> tuple[Optional[str], str, str]:
-        key = self.PRIMARY_MAP.get(note)
+    def _map_note_with_context_verbose(self, note: NoteSpan, cluster_notes: Sequence[int], present_keys: set[str], history: Sequence[str]) -> tuple[Optional[str], str, str]:
+        midi_note = int(note.midi_note)
+        hat_key, hat_reason, hat_kind = self._map_hat_note(midi_note, note, cluster_notes, present_keys, history)
+        if hat_key:
+            return hat_key, hat_reason, hat_kind
+
+        key = self.PRIMARY_MAP.get(midi_note)
         if key:
             return key, "直接映射", "direct"
-        key = self.EXTENDED_MAP.get(note)
+        key = self.EXTENDED_MAP.get(midi_note)
         if key:
             return key, "扩展映射", "extended"
         if not self.use_context_replace:
-            key = self._fallback_key_for_note(note)
+            key = self._fallback_key_for_note(midi_note)
             return (key, "基础回退", "fallback") if key else (None, "未映射", "ignored")
 
-        if note in {54, 56, 71, 75, 76}:
-            return self._choose_cymbal_variant(note, present_keys, history), "上下文替代：镲类", "context"
-        if 60 <= note <= 66:
+        if midi_note in {54, 56, 71, 75, 76}:
+            return self._choose_cymbal_variant(midi_note, present_keys, history), "上下文替代：镲类", "context"
+        if 60 <= midi_note <= 66:
             if any(n in {41, 43, 45, 47, 48, 50, 58} for n in cluster_notes):
-                return ("E" if note >= 63 else "W"), "上下文替代：手鼓/定音鼓", "context"
-            return ("Y" if note >= 64 else "W"), "上下文替代：辅打击", "context"
-        if note in {67, 74}:
+                return ("E" if midi_note >= 63 else "W"), "上下文替代：手鼓/定音鼓", "context"
+            return ("Y" if midi_note >= 64 else "W"), "上下文替代：辅打击", "context"
+        if midi_note in {67, 74}:
             return ("S" if "S" not in present_keys else "T"), "上下文替代：踩镲系", "context"
-        key = self._fallback_key_for_note(note)
+        key = self._fallback_key_for_note(midi_note)
         return (key, "区间回退", "fallback") if key else (None, "未映射", "ignored")
+
+    def _map_hat_note(self, midi_note: int, note: NoteSpan, cluster_notes: Sequence[int], present_keys: set[str], history: Sequence[str]) -> tuple[Optional[str], str, str]:
+        if midi_note in self.PEDAL_HIHAT_NOTES:
+            return "S", "脚踩踩镲→Pedal Hi-Hat", "hat"
+        if midi_note in self.CLOSED_HIHAT_NOTES:
+            return "S", "闭合踩镲→Pedal Hi-Hat", "hat"
+        if midi_note in self.OPEN_HIHAT_NOTES:
+            duration = self._note_duration_sec(note)
+            if duration <= 0.040 and midi_note != 46 and "S" not in present_keys and not any((n in self.CLOSED_HIHAT_NOTES) or (n in self.PEDAL_HIHAT_NOTES) for n in cluster_notes):
+                return "S", "短踩镲兼容→Pedal Hi-Hat", "hat"
+            if duration <= 0.050 and midi_note in {23, 24, 25} and "S" not in present_keys:
+                return "S", "扩展短闭镲→Pedal Hi-Hat", "hat"
+            return "T", "开放/半开放踩镲→Hi-Hat", "hat"
+        return None, "", ""
+
+    @staticmethod
+    def _note_duration_sec(note: NoteSpan) -> float:
+        duration = max(0.0, float(getattr(note, "raw_duration_sec", 0.0) or 0.0))
+        if duration <= 0.0:
+            duration = max(0.0, float(getattr(note, "end_sec", 0.0) or 0.0) - float(getattr(note, "start_sec", 0.0) or 0.0))
+        if duration <= 0.0:
+            duration = max(0.0, float(getattr(note, "raw_end_sec", 0.0) or 0.0) - float(getattr(note, "start_sec", 0.0) or 0.0))
+        return duration
 
     def _choose_cymbal_variant(self, note: int, present_keys: set[str], history: Sequence[str]) -> str:
         preferred = "Y" if note in {54, 75, 76} else "R"
@@ -1616,7 +2479,7 @@ class ModernDrumBackend(LiveBackendBase):
 
         keep: List[DrumHit] = []
         chosen_keys: set[str] = set()
-        for essential in ["F", "Q", "T", "S"]:
+        for essential in ["F", "Q", "S", "T"]:
             hit = best_by_key.get(essential)
             if hit is not None and essential not in chosen_keys:
                 keep.append(hit)
@@ -1637,38 +2500,77 @@ class ModernDrumBackend(LiveBackendBase):
             chosen_keys.add(hit.key)
         return sorted(keep[:self.max_simultaneous], key=lambda h: (self.KEY_PRIORITY.get(h.key, 99), -h.velocity))
 
-    def _hold_for_velocity(self, key: str, velocity: int) -> float:
+    def _hold_for_note(self, key: str, note: NoteSpan) -> float:
+        velocity = int(getattr(note, "velocity", 0) or 0)
+        duration = self._note_duration_sec(note)
+        if key == "S":
+            hold = max(0.004, min(0.010, 0.004 + duration * 0.18))
+            if velocity <= self.ghost_velocity:
+                hold *= 0.90
+            elif velocity >= self.accent_velocity:
+                hold *= 1.04
+            return max(0.004, min(0.011, hold))
+        if key == "T":
+            hold = max(0.006, min(0.017, 0.007 + duration * 0.24))
+            if velocity <= self.ghost_velocity:
+                hold *= 0.92
+            elif velocity >= self.accent_velocity:
+                hold *= 1.10
+            return max(0.006, min(0.018, hold))
+        if key in {"R", "Y"}:
+            hold = max(0.007, min(0.026, 0.008 + duration * 0.22))
+            if velocity <= self.ghost_velocity:
+                hold *= 0.86
+            elif velocity >= self.accent_velocity:
+                hold *= 1.15
+            return max(0.006, min(0.028, hold))
+
         hold = self.base_tap_hold
         if not self.use_velocity_rules:
-            return max(0.004, min(0.040, hold))
-        if key in {"Q", "F", "T", "S"}:
+            if duration > 0.0:
+                hold = max(hold, min(0.020, 0.005 + duration * 0.16))
+            return max(0.004, min(0.030, hold))
+        if key in {"Q", "F"}:
             if velocity <= self.ghost_velocity:
                 hold *= 0.72
             elif velocity >= self.accent_velocity:
                 hold *= 1.20
-        elif key in {"R", "Y"}:
-            if velocity <= self.ghost_velocity:
-                hold *= 0.82
-            elif velocity >= self.accent_velocity:
-                hold *= 1.28
         else:
             if velocity <= self.ghost_velocity:
                 hold *= 0.78
             elif velocity >= self.accent_velocity:
                 hold *= 1.18
-        return max(0.004, min(0.040, hold))
+        if duration > 0.0:
+            hold = max(hold, min(0.022, 0.005 + duration * 0.18))
+        return max(0.004, min(0.030, hold))
+
+    def _min_gap_for_key(self, key: str) -> float:
+        base_gap = 1.0 / max(1.0, self.density_limit_hz)
+        if key == "S":
+            return min(base_gap, 0.016)
+        if key == "T":
+            return min(base_gap, 0.018)
+        if key in {"R", "Y"}:
+            return min(base_gap, 0.022)
+        return base_gap
 
     def _density_limit(self, hits: Sequence[DrumHit]) -> List[DrumHit]:
         if not hits:
             return []
-        min_gap = 1.0 / max(1.0, self.density_limit_hz)
-        last_time: dict[str, float] = {}
+        last_meta: dict[str, tuple[float, int]] = {}
         limited: List[DrumHit] = []
         for hit in hits:
-            prev = last_time.get(hit.key)
-            if prev is not None and hit.t - prev < min_gap:
+            min_gap = self._min_gap_for_key(hit.key)
+            prev = last_meta.get(hit.key)
+            if prev is not None and hit.t - prev[0] < min_gap:
+                prev_index = prev[1]
+                prev_hit = limited[prev_index]
+                if hit.velocity > prev_hit.velocity or (hit.velocity == prev_hit.velocity and hit.hold < prev_hit.hold):
+                    limited[prev_index] = hit
+                    last_meta[hit.key] = (hit.t, prev_index)
                 continue
-            last_time[hit.key] = hit.t
             limited.append(hit)
+            last_meta[hit.key] = (hit.t, len(limited) - 1)
         return limited
+
 
