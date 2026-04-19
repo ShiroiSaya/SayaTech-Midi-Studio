@@ -48,6 +48,7 @@ from .crash_logging import append_runtime_log, runtime_log_path, set_runtime_deb
 from .ensemble import beijing_now, sync_beijing_clock
 from .config_io import DEFAULT_TEMPLATE, SUPPORTED_FIELDS, ensure_config_file, load_config, midi_to_note_name as cfg_midi_to_note_name, note_name_to_midi, save_config
 from .midi_analysis import analyze_midi, filter_analysis, midi_to_note_name
+from .status_indicators import CircularStatusIndicator
 from .models import MidiAnalysisResult, NoteSpan, TrackInfo
 from .theme import build_stylesheet
 from .transport import TransportController
@@ -1379,6 +1380,9 @@ class MainWindow(QMainWindow):
         self.ui_settings = load_ui_settings(None)
         set_runtime_debug_mode(bool(getattr(self.ui_settings, 'debug_mode', False)))
         self.config_widgets: Dict[str, QWidget] = {}
+        self.config_field_labels: Dict[str, QLabel] = {}
+        self.config_section_cards: Dict[str, QWidget] = {}
+        self.config_section_keys: Dict[str, list[str]] = {}
         self.drum_param_widgets: Dict[str, QWidget] = {}
         self.tuner_suggestions: Dict[str, object] = {}
         self._tuner_inflight = False
@@ -1427,6 +1431,8 @@ class MainWindow(QMainWindow):
         self.current_mode = "piano"
         self.selected_piano_tracks: set[int] = set()
         self.selected_drum_tracks: set[int] = set()
+        self.applied_piano_tracks: set[int] = set()
+        self.applied_drum_tracks: set[int] = set()
         self._hotkey_last_trigger: Dict[str, float] = {"play": 0.0, "pause": 0.0, "stop": 0.0}
         self._global_hotkey_state: Dict[tuple[int, tuple[int, ...]], bool] = {}
         self._last_applied_stylesheet = ""
@@ -1439,6 +1445,7 @@ class MainWindow(QMainWindow):
         self._apply_page_update_policy()
         self._load_config_into_form()
         self._load_drum_config_widgets()
+        self._apply_pure_mode_ui()
         self._wire_transport()
         self._setup_shortcuts()
         self._setup_global_hotkeys()
@@ -1584,12 +1591,12 @@ class MainWindow(QMainWindow):
         track_layout.setContentsMargins(12, 12, 12, 12)
         track_layout.addWidget(QLabel("轨道选择"))
         button_grid = QGridLayout()
-        self.recommend_btn = QPushButton("智能选轨")
+        self.recommend_btn = QPushButton("确认轨道选择")
         self.select_all_btn = QPushButton("全选")
         self.clear_btn = QPushButton("清空")
         self.refresh_btn = QPushButton("刷新")
         for btn, slot in [
-            (self.recommend_btn, self._select_recommended_tracks),
+            (self.recommend_btn, self._confirm_track_selection),
             (self.select_all_btn, self._select_all_tracks),
             (self.clear_btn, self._clear_tracks),
             (self.refresh_btn, self._refresh_transport_for_mode),
@@ -1987,24 +1994,50 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
 
         top = Card()
-        top_layout = QHBoxLayout(top)
-        top_layout.setContentsMargins(14, 12, 14, 12)
-        title_box = QVBoxLayout()
+        top_root_layout = QVBoxLayout(top)
+        top_root_layout.setContentsMargins(14, 12, 14, 12)
+        top_root_layout.setSpacing(8)
+
+        header_row = QWidget()
+        header_row_layout = QHBoxLayout(header_row)
+        header_row_layout.setContentsMargins(0, 0, 0, 0)
+        header_row_layout.setSpacing(10)
         title = QLabel("参数配置")
         title.setProperty("sectionTitle", True)
-        title_box.addWidget(title)
-        desc = QLabel("这里保留会直接影响演奏结果的核心参数。")
-        desc.setProperty("muted", True)
-        desc.setWordWrap(True)
-        title_box.addWidget(desc)
-        top_layout.addLayout(title_box)
-        top_layout.addStretch(1)
+        header_row_layout.addWidget(title, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        header_row_layout.addStretch(1)
+
+        button_row = QWidget()
+        self.config_header_button_row = button_row
+        button_row.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        button_row_layout = QHBoxLayout(button_row)
+        button_row_layout.setContentsMargins(0, 0, 0, 0)
+        button_row_layout.setSpacing(8)
+        self._config_header_buttons = []
+        self.pure_mode_btn = QPushButton("纯净直出模式：关" if not self._pure_mode_enabled() else "纯净直出模式：开")
+        self.pure_mode_btn.clicked.connect(self._toggle_pure_mode)
+        self.pure_mode_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._config_header_buttons.append(self.pure_mode_btn)
+        button_row_layout.addWidget(self.pure_mode_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
         for text_btn, slot in [("从文件重读", self._reload_config_from_disk), ("应用到当前运行", self._apply_config_from_form), ("保存 config.txt", self._save_config_to_disk)]:
             btn = QPushButton(text_btn)
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             if text_btn == "应用到当前运行":
                 btn.setProperty("primary", True)
             btn.clicked.connect(slot)
-            top_layout.addWidget(btn)
+            self._config_header_buttons.append(btn)
+            button_row_layout.addWidget(btn, 0, Qt.AlignRight | Qt.AlignVCenter)
+        self._stabilize_config_header_buttons()
+        header_row_layout.addWidget(button_row, 0, Qt.AlignRight | Qt.AlignVCenter)
+        top_root_layout.addWidget(header_row)
+
+        desc = QLabel("这里保留会直接影响演奏结果的核心参数。")
+        self.config_page_desc_label = desc
+        desc.setProperty("muted", True)
+        desc.setWordWrap(True)
+        desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        desc.setMinimumHeight(desc.fontMetrics().lineSpacing() * 2 + 4)
+        top_root_layout.addWidget(desc)
         layout.addWidget(top)
 
         scroll = QScrollArea()
@@ -2048,6 +2081,8 @@ class MainWindow(QMainWindow):
             title = QLabel(section_name)
             title.setProperty("sectionTitle", True)
             card_layout.addWidget(title, 0, 0, 1, 2)
+            self.config_section_cards[section_name] = card
+            self.config_section_keys[section_name] = [spec.key for spec in specs]
             desc_text = section_desc.get(section_name, "")
             row = 1
             if desc_text:
@@ -2060,6 +2095,7 @@ class MainWindow(QMainWindow):
                 label = QLabel(spec.label)
                 label.setProperty("fieldLabel", True)
                 label.setToolTip(spec.help_text)
+                self.config_field_labels[spec.key] = label
                 card_layout.addWidget(label, row, 0)
                 widget = self._create_config_widget(spec)
                 widget.setToolTip(spec.help_text)
@@ -2099,6 +2135,100 @@ class MainWindow(QMainWindow):
             return widget
         widget = QLineEdit()
         return widget
+
+    def _pure_mode_enabled(self) -> bool:
+        return bool(self.runtime_config.get("PURE_MODE", False))
+
+    def _stabilize_config_header_buttons(self) -> None:
+        buttons = getattr(self, '_config_header_buttons', None) or []
+        if not buttons:
+            return
+        texts = [
+            "纯净直出模式：关",
+            "纯净直出模式：开",
+            "从文件重读",
+            "应用到当前运行",
+            "保存 config.txt",
+        ]
+        max_width = 0
+        base_padding = 36
+        for btn in buttons:
+            metrics = btn.fontMetrics()
+            for text in texts:
+                max_width = max(max_width, metrics.horizontalAdvance(text) + base_padding)
+        max_width = max(max_width, 108)
+        for btn in buttons:
+            btn.setMinimumWidth(max_width)
+            btn.setMaximumWidth(max_width)
+            btn.updateGeometry()
+
+    def _prime_config_page_layout(self) -> None:
+        self._stabilize_config_header_buttons()
+        desc_label = getattr(self, 'config_page_desc_label', None)
+        if desc_label is not None:
+            desc_label.updateGeometry()
+        widget = None
+        if hasattr(self, 'pages') and self.pages is not None and self.pages.count() > 1:
+            widget = self.pages.widget(1)
+        if widget is not None:
+            widget.updateGeometry()
+            layout = widget.layout()
+            if layout is not None:
+                layout.activate()
+
+    def _refresh_pure_mode_button_style(self) -> None:
+        btn = getattr(self, 'pure_mode_btn', None)
+        if btn is None:
+            return
+        enabled = self._pure_mode_enabled()
+        btn.setText("纯净直出模式：开" if enabled else "纯净直出模式：关")
+        btn.setProperty("primary", enabled)
+        style = btn.style()
+        if style is not None:
+            style.unpolish(btn)
+            style.polish(btn)
+        self._stabilize_config_header_buttons()
+        btn.update()
+
+    def _apply_pure_mode_ui(self) -> None:
+        enabled = self._pure_mode_enabled()
+        allowed_keys = {
+            "HIGH_FREQ_COMPAT",
+            "HIGH_FREQ_RELEASE_ADVANCE",
+            "FORCE_PEDAL_MODE",
+            "FORCE_PEDAL_REPRESS_GAP",
+        }
+        self._refresh_pure_mode_button_style()
+        desc_label = getattr(self, 'config_page_desc_label', None)
+        if desc_label is not None:
+            if enabled:
+                desc_label.setText("纯净直出模式已开启：仅保留高频兼容和强制踏板，其余智能调参项已隐藏。")
+            else:
+                desc_label.setText("这里保留会直接影响演奏结果的核心参数。")
+            desc_label.updateGeometry()
+        for key, label in getattr(self, 'config_field_labels', {}).items():
+            widget = self.config_widgets.get(key)
+            visible = (not enabled) or (key in allowed_keys)
+            label.setVisible(visible)
+            if widget is not None:
+                widget.setVisible(visible)
+        for section_name, card in getattr(self, 'config_section_cards', {}).items():
+            if not enabled:
+                card.setVisible(True)
+                continue
+            section_keys = self.config_section_keys.get(section_name, [])
+            keep_section = any(key in allowed_keys for key in section_keys)
+            card.setVisible(keep_section)
+
+    def _toggle_pure_mode(self) -> None:
+        enabled = not self._pure_mode_enabled()
+        self.runtime_config["PURE_MODE"] = enabled
+        self._mark_runtime_config_dirty()
+        self._apply_pure_mode_ui()
+        self._apply_runtime_config_to_backends()
+        if self.current_analysis is not None:
+            self._schedule_transport_refresh(immediate=True)
+        self._log("已开启纯净直出模式。" if enabled else "已关闭纯净直出模式。")
 
     def _build_tuner_page(self) -> QWidget:
         page = QWidget()
@@ -2194,8 +2324,8 @@ class MainWindow(QMainWindow):
         transport_title = QLabel("播放状态")
         transport_title.setProperty("sectionTitle", True)
         transport_layout.addWidget(transport_title)
-        self.state_badge = QLabel("stopped")
-        self.state_badge.setProperty("badge", True)
+        self.state_badge = CircularStatusIndicator("stopped")
+        self.state_badge.setStatusColor("#5b9eff")
         transport_layout.addWidget(self.state_badge, 0, Qt.AlignLeft)
         self.summary_label = QLabel("还没有载入 MIDI 文件")
         self.summary_label.setWordWrap(True)
@@ -2210,8 +2340,8 @@ class MainWindow(QMainWindow):
         ensemble_title = QLabel("合奏定时")
         ensemble_title.setProperty("sectionTitle", True)
         ensemble_layout.addWidget(ensemble_title)
-        self.ensemble_status_badge = QLabel("未启用")
-        self.ensemble_status_badge.setProperty("badge", True)
+        self.ensemble_status_badge = CircularStatusIndicator("未启用")
+        self.ensemble_status_badge.setStatusColor("#ffd43b")
         ensemble_layout.addWidget(self.ensemble_status_badge, 0, Qt.AlignLeft)
         self.beijing_time_label = QLabel("北京时间：同步中...")
         self.beijing_time_label.setProperty("kpiValue", True)
@@ -2691,18 +2821,18 @@ class MainWindow(QMainWindow):
         if self._analysis_cache_source_id != source_id:
             self._analysis_cache.clear()
             self._analysis_cache_source_id = source_id
-        if backend_kind == "drum":
-            selected = set(self.selected_drum_tracks or set(self.current_analysis.recommended_drum_indexes))
-        else:
-            selected = set(self.selected_piano_tracks or set(self.current_analysis.recommended_track_indexes))
-        if not selected:
-            return self.current_analysis
+        selected = set(self._applied_track_selection_for_mode(backend_kind))
         cache_key = (backend_kind, tuple(sorted(selected)))
         cached = self._analysis_cache.get(cache_key)
         if cached is None:
             if not allow_build:
                 return None
-            cached = filter_analysis(self.current_analysis, selected, use_gpu=bool(getattr(self.ui_settings, "gpu_acceleration", False)))
+            cached = filter_analysis(
+                self.current_analysis,
+                selected,
+                use_gpu=bool(getattr(self.ui_settings, "gpu_acceleration", False)),
+                allow_empty=True,
+            )
             self._analysis_cache[cache_key] = cached
         return cached
 
@@ -2783,26 +2913,49 @@ class MainWindow(QMainWindow):
             return drum_only or result
         return [t for t in self.current_analysis.track_infos if t.note_count > 0 and not t.looks_like_drum] or [t for t in self.current_analysis.track_infos if t.note_count > 0]
 
-    def _selected_track_set_for_mode(self) -> set[int]:
-        return self.selected_drum_tracks if self.current_mode == "drum" else self.selected_piano_tracks
+    def _pending_track_selection_for_mode(self, mode: Optional[str] = None) -> set[int]:
+        return self.selected_drum_tracks if self._backend_kind_for_mode(mode) == "drum" else self.selected_piano_tracks
 
-    def _recommended_track_set_for_mode(self) -> set[int]:
-        if not self.current_analysis:
-            return set()
-        return set(self.current_analysis.recommended_drum_indexes if self.current_mode == "drum" else self.current_analysis.recommended_track_indexes)
+    def _applied_track_selection_for_mode(self, mode: Optional[str] = None) -> set[int]:
+        return self.applied_drum_tracks if self._backend_kind_for_mode(mode) == "drum" else self.applied_piano_tracks
+
+    def _is_track_selection_dirty(self, mode: Optional[str] = None) -> bool:
+        return tuple(sorted(self._pending_track_selection_for_mode(mode))) != tuple(sorted(self._applied_track_selection_for_mode(mode)))
+
+    def _update_track_selection_ui(self, mode: Optional[str] = None) -> None:
+        backend_kind = self._backend_kind_for_mode(mode)
+        dirty = self._is_track_selection_dirty(backend_kind)
+        if hasattr(self, 'recommend_btn'):
+            self.recommend_btn.setText("确认轨道选择*" if dirty else "确认轨道选择")
+            self.recommend_btn.setProperty("primary", dirty)
+            style = self.recommend_btn.style()
+            if style is not None:
+                style.unpolish(self.recommend_btn)
+                style.polish(self.recommend_btn)
+            self.recommend_btn.update()
+        if hasattr(self, 'drum_hint_label'):
+            drum_dirty = self._is_track_selection_dirty('drum')
+            suffix = "（待确认）" if drum_dirty else ""
+            self.drum_hint_label.setText(f"已选 {len(self.selected_drum_tracks)} 轨{suffix}")
 
     def _switch_mode(self, current: QListWidgetItem, _previous: Optional[QListWidgetItem]) -> None:
         mode = current.data(Qt.UserRole) if current else "piano"
         self.current_mode = mode
         if hasattr(self, 'pages'):
-            self.pages.fade_to_index({"piano": 0, "config": 1, "tuner": 2, "drum": 3}.get(mode, 0))
+            target_index = {"piano": 0, "config": 1, "tuner": 2, "drum": 3}.get(mode, 0)
+            if mode == "config":
+                self._prime_config_page_layout()
+            self.pages.fade_to_index(target_index)
         mode_text = current.text() if current else mode
         self._finish_switch_mode(mode_text)
 
     def _finish_switch_mode(self, mode_text: str) -> None:
         self._populate_track_tree(self._mode_tracks())
+        self._update_track_selection_ui()
         self._schedule_transport_refresh(immediate=True)
         self._apply_page_update_policy()
+        if self.current_mode == "config" and hasattr(self, "pages"):
+            self._prime_config_page_layout()
         self._sync_visible_playback_widgets()
         self._sync_mode_cards()
 
@@ -2885,7 +3038,10 @@ class MainWindow(QMainWindow):
         self._midi_load_inflight = bool(loading)
         if loading:
             self.state_badge.setText("正在后台分析 MIDI…")
+            self.state_badge.setStatusColor("#74c0fc")
+            self.state_badge.start_pulse()
         else:
+            self.state_badge.stop_pulse()
             self._update_state_ui(self.transport.state.value if hasattr(self.transport.state, "value") else str(self.transport.state))
         widgets = [
             getattr(self, 'open_btn', None),
@@ -2949,7 +3105,10 @@ class MainWindow(QMainWindow):
         self._invalidate_analysis_cache()
         self.selected_piano_tracks = set(data.get('piano_selected') or set())
         self.selected_drum_tracks = set(data.get('drum_selected') or set())
+        self.applied_piano_tracks = set(self.selected_piano_tracks)
+        self.applied_drum_tracks = set(self.selected_drum_tracks)
         self._populate_track_tree(self._mode_tracks())
+        self._update_track_selection_ui()
         self._schedule_transport_refresh(immediate=True)
         bpm_text = f"{analysis.primary_bpm:.1f} BPM" + (" · 多段" if analysis.has_tempo_changes else "")
         self._set_status_card(self.piano_bpm_card, "当前 MIDI BPM", bpm_text, os.path.basename(path))
@@ -3032,9 +3191,7 @@ class MainWindow(QMainWindow):
         self.transport.play()
 
     def _populate_track_tree(self, tracks: List[TrackInfo]) -> None:
-        selected = self._selected_track_set_for_mode()
-        if not selected:
-            selected.update(self._recommended_track_set_for_mode())
+        selected = set(self._pending_track_selection_for_mode())
         render_key = (
             self._backend_kind_for_mode(),
             tuple((t.index, t.note_count, t.min_note, t.max_note, bool(t.looks_like_drum), t.name) for t in tracks),
@@ -3062,38 +3219,40 @@ class MainWindow(QMainWindow):
 
     def _on_track_item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
         self._track_tree_render_key = None
-        selected = self._selected_track_set_for_mode()
+        selected = self._pending_track_selection_for_mode()
         track_index = int(item.data(0, Qt.UserRole))
         if item.checkState(0) == Qt.Checked:
             selected.add(track_index)
         else:
             selected.discard(track_index)
-        if self.current_mode == "drum":
-            drum_tracks = self.selected_drum_tracks or set(self.current_analysis.recommended_drum_indexes if self.current_analysis else [])
-            self.drum_hint_label.setText(f"已选 {len(drum_tracks)} 轨")
-        self._schedule_transport_refresh(immediate=False)
+        self._update_track_selection_ui()
 
-    def _select_recommended_tracks(self) -> None:
+    def _confirm_track_selection(self) -> None:
         self._track_tree_render_key = None
-        selected = self._selected_track_set_for_mode()
-        selected.clear()
-        selected.update(self._recommended_track_set_for_mode())
-        self._populate_track_tree(self._mode_tracks())
+        pending = self._pending_track_selection_for_mode()
+        applied = self._applied_track_selection_for_mode()
+        if tuple(sorted(pending)) == tuple(sorted(applied)):
+            self._update_track_selection_ui()
+            return
+        applied.clear()
+        applied.update(pending)
+        self._invalidate_analysis_cache()
+        self._update_track_selection_ui()
         self._schedule_transport_refresh(immediate=True)
 
     def _select_all_tracks(self) -> None:
         self._track_tree_render_key = None
-        selected = self._selected_track_set_for_mode()
+        selected = self._pending_track_selection_for_mode()
         selected.clear()
         selected.update({t.index for t in self._mode_tracks()})
         self._populate_track_tree(self._mode_tracks())
-        self._schedule_transport_refresh(immediate=True)
+        self._update_track_selection_ui()
 
     def _clear_tracks(self) -> None:
         self._track_tree_render_key = None
-        self._selected_track_set_for_mode().clear()
+        self._pending_track_selection_for_mode().clear()
         self._populate_track_tree(self._mode_tracks())
-        self._schedule_transport_refresh(immediate=True)
+        self._update_track_selection_ui()
 
     def _analysis_for_current_mode(self) -> Optional[MidiAnalysisResult]:
         return self._analysis_for_backend_kind(self._backend_kind_for_mode())
@@ -3115,8 +3274,7 @@ class MainWindow(QMainWindow):
                     self.piano_roll_detail.set_analysis(analysis)
                     self.piano_roll_detail.set_position(self.transport.position_sec)
             else:
-                drum_tracks = self.selected_drum_tracks or set(self.current_analysis.recommended_drum_indexes if self.current_analysis else [])
-                self.drum_hint_label.setText(f"已选 {len(drum_tracks)} 轨")
+                self._update_track_selection_ui('drum')
                 if (not self._performance_mode_enabled()) and self._drum_preview_mode == "detail" and self.drum_roll_detail is not None:
                     self.drum_roll_detail.set_analysis(analysis)
                     self.drum_roll_detail.set_position(self.transport.position_sec)
@@ -3189,7 +3347,7 @@ class MainWindow(QMainWindow):
             self.drum_waveform.set_analysis(analysis)
             self.drum_progress_slider.setValue(0)
             self.drum_time_label.setText(f"00:00 / {end_text}")
-            self.drum_hint_label.setText(f"已选 {len(self.selected_drum_tracks or set(analysis.recommended_drum_indexes))} 轨")
+            self._update_track_selection_ui('drum')
         self._refresh_playback_controls()
 
     def _update_position_ui(self, position_sec: float, duration_sec: float) -> None:
@@ -3239,22 +3397,33 @@ class MainWindow(QMainWindow):
 
     def _update_state_ui(self, state: str) -> None:
         if state == 'stopped':
-            badge, pretty, _button_text, hint, _ready = self._current_playback_visuals()
+            badge, pretty, _button_text, hint, ready = self._current_playback_visuals()
             self.state_badge.setText(badge)
+            if ready:
+                self.state_badge.setStatusColor("#34d399")
+                self.state_badge.stop_pulse()
+            else:
+                self.state_badge.setStatusColor("#ffd43b")
+                self.state_badge.start_pulse()
             self._set_status_card(self.piano_state_card, "播放状态", pretty, hint)
             self._set_status_card(self.drum_state_card, "播放状态", pretty, hint)
         else:
             plan_label = self._active_plan_label()
             if state == 'playing':
                 self.state_badge.setText('播放中')
+                self.state_badge.setStatusColor("#5b9eff")
+                self.state_badge.start_pulse()
                 pretty = f"播放中（{plan_label}）" if plan_label else '播放中'
                 hint = '演奏进行中'
             elif state == 'paused':
                 self.state_badge.setText('已暂停')
+                self.state_badge.setStatusColor("#ffd43b")
+                self.state_badge.stop_pulse()
                 pretty = f"已暂停（{plan_label}）" if plan_label else '已暂停'
                 hint = '可继续或回到起点'
             else:
                 self.state_badge.setText(state)
+                self.state_badge.setStatusColor("#ff6b6b")
                 pretty, hint = self._display_state_meta(state)
             self._set_status_card(self.piano_state_card, "播放状态", pretty, hint)
             self._set_status_card(self.drum_state_card, "播放状态", pretty, hint)
@@ -3423,6 +3592,7 @@ class MainWindow(QMainWindow):
                 else:
                     widget.setText(str(value))
         self._load_drum_config_widgets()
+        self._apply_pure_mode_ui()
 
     def _collect_config_from_form(self) -> Dict[str, object]:
         config = dict(self.runtime_config)
@@ -3442,7 +3612,12 @@ class MainWindow(QMainWindow):
                 raw = widget.text().strip()
                 if spec.kind == "note":
                     from .config_io import note_name_to_midi
-                    config[spec.key] = note_name_to_midi(raw or "C3")
+                    try:
+                        config[spec.key] = note_name_to_midi(raw or "C3")
+                    except (ValueError, TypeError) as exc:
+                        QMessageBox.warning(self, "音名格式错误",
+                                          f"音名格式不正确: {raw}\n错误: {exc}\n使用默认值 C3")
+                        config[spec.key] = note_name_to_midi("C3")
                 elif spec.key == "KEYMAP":
                     config[spec.key] = [x.strip() for x in raw.split(",") if x.strip()]
                 else:
@@ -3515,7 +3690,14 @@ class MainWindow(QMainWindow):
         if playable_min > playable_max:
             QMessageBox.warning(self, "区间输入无效", "可弹奏最低音不能高于最高音。")
             return
-        analysis = self._analysis_for_current_mode() or self.current_analysis
+        backend_kind = "piano"
+        if hasattr(self, "tuner_instrument_combo"):
+            instrument_text = str(self.tuner_instrument_combo.currentText()).strip()
+            if instrument_text in {"贝斯", "bass", "BASS"}:
+                backend_kind = "piano"
+            elif instrument_text in {"吉他", "guitar", "GUITAR"}:
+                backend_kind = "piano"
+        analysis = self._analysis_for_backend_kind(backend_kind) or self.current_analysis
         current_config = dict(self.runtime_config)
         if hasattr(self, "tuner_instrument_combo"):
             current_config["INSTRUMENT_MODE"] = self.tuner_instrument_combo.currentText()
@@ -3586,6 +3768,7 @@ class MainWindow(QMainWindow):
                 self.nav_list.setCurrentRow(row)
                 self.nav_list.blockSignals(False)
         if hasattr(self, 'pages') and self.pages is not None:
+            self._prime_config_page_layout()
             fade_to = getattr(self.pages, 'fade_to_index', None)
             if callable(fade_to):
                 fade_to(1)
@@ -3602,6 +3785,8 @@ class MainWindow(QMainWindow):
         if not self.ensemble_active:
             self.ensemble_status_label.setText("合奏状态：未启用")
             self.ensemble_status_badge.setText("未启用")
+            self.ensemble_status_badge.setStatusColor("#ffd43b")
+            self.ensemble_status_badge.stop_pulse()
 
     def _parse_ensemble_target(self) -> Optional[datetime]:
         text = self.ensemble_target_edit.text().strip()
@@ -3638,6 +3823,8 @@ class MainWindow(QMainWindow):
             self.ensemble_fired = False
             self.ensemble_status_label.setText("合奏状态：目标时间已过，请重新设置")
             self.ensemble_status_badge.setText("时间已过")
+            self.ensemble_status_badge.setStatusColor("#ff6b6b")
+            self.ensemble_status_badge.stop_pulse()
             self._log("合奏未启用：目标时间已经过去，请重新设置。")
             return
         self.ensemble_target = target
@@ -3645,6 +3832,8 @@ class MainWindow(QMainWindow):
         self.ensemble_fired = False
         self.ensemble_status_label.setText(f"合奏状态：已准备，目标 {target.strftime('%Y-%m-%d %H:%M:%S')}")
         self.ensemble_status_badge.setText("已准备")
+        self.ensemble_status_badge.setStatusColor("#34d399")
+        self.ensemble_status_badge.start_pulse()
         self._log(f"合奏已准备：{target.strftime('%Y-%m-%d %H:%M:%S')}（北京时间）")
 
     def _cancel_ensemble(self) -> None:
@@ -3652,6 +3841,8 @@ class MainWindow(QMainWindow):
         self.ensemble_fired = False
         self.ensemble_status_label.setText("合奏状态：已取消")
         self.ensemble_status_badge.setText("已取消")
+        self.ensemble_status_badge.setStatusColor("#ff6b6b")
+        self.ensemble_status_badge.stop_pulse()
         self._log("已取消单次合奏。")
 
     def _start_clock_sync(self, *, reason: str) -> None:
@@ -3692,10 +3883,14 @@ class MainWindow(QMainWindow):
             self._play_transport()
             self.ensemble_status_label.setText("合奏状态：已触发，已开始播放")
             self.ensemble_status_badge.setText("已触发")
+            self.ensemble_status_badge.setStatusColor("#5b9eff")
+            self.ensemble_status_badge.start_pulse()
             self._log("合奏已触发：到点立即开播。")
         else:
             self.ensemble_status_label.setText(f"合奏状态：已触发，将在 {delay_sec:.1f}s 后开始")
             self.ensemble_status_badge.setText("即将开始")
+            self.ensemble_status_badge.setStatusColor("#74c0fc")
+            self.ensemble_status_badge.start_pulse()
             self._log(f"合奏已触发：将在 {delay_sec:.1f}s 后开始播放。")
             QTimer.singleShot(int(delay_sec * 1000), self._play_transport)
 
@@ -3726,11 +3921,15 @@ class MainWindow(QMainWindow):
                         f"合奏状态：已准备 | 目标 {self.ensemble_target.strftime('%Y-%m-%d %H:%M:%S')} | 剩余 {minutes:02d}:{seconds:02d}.{millis:03d}"
                     )
                     self.ensemble_status_badge.setText("倒计时中")
+                    self.ensemble_status_badge.setStatusColor("#5b9eff")
+                    self.ensemble_status_badge.start_pulse()
             else:
                 self._trigger_ensemble_start()
         elif not self.ensemble_fired and not self.ensemble_active and should_render:
             self.ensemble_status_label.setText("合奏状态：未启用")
             self.ensemble_status_badge.setText("未启用")
+            self.ensemble_status_badge.setStatusColor("#ffd43b")
+            self.ensemble_status_badge.stop_pulse()
         if self.transport.state.value != 'playing' or should_render:
             self._refresh_playback_controls()
 
