@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .app_paths import logs_dir
+
 _SESSION_ID = datetime.now().strftime('%Y%m%d_%H%M%S') + f'_pid{os.getpid()}'
 _RUNTIME_LOG_PATH: Optional[Path] = None
 _CRASH_DIR: Optional[Path] = None
@@ -19,14 +21,10 @@ _ORIGINAL_THREADING_EXCEPTHOOK = getattr(threading, 'excepthook', None)
 _RUNTIME_DEBUG_ENABLED = False
 
 
-def project_root() -> Path:
-    return Path(__file__).resolve().parent.parent
-
-
 def log_dir() -> Path:
     global _CRASH_DIR
     if _CRASH_DIR is None:
-        _CRASH_DIR = project_root() / 'crash_logs'
+        _CRASH_DIR = logs_dir()
         _CRASH_DIR.mkdir(parents=True, exist_ok=True)
     return _CRASH_DIR
 
@@ -89,12 +87,12 @@ def write_crash_log(title: str, exc: BaseException, context: Optional[Dict[str, 
     with path.open('w', encoding='utf-8') as f:
         f.write(json.dumps(payload, ensure_ascii=False, indent=2))
         f.write('\n')
-    append_runtime_log(f'CRASH LOG WRITTEN: {path.name} | {type(exc).__name__}: {exc}')
+    append_runtime_log(f'已生成崩溃日志：{path.name} | {type(exc).__name__}: {exc}', debug=True)
     return str(path)
 
 
 def install_global_hooks() -> None:
-    append_runtime_log('Crash logging initialized.')
+    append_runtime_log('Crash logging initialized.', debug=True)
 
     def sys_hook(exc_type, exc_value, exc_tb):
         if exc_type is KeyboardInterrupt:
