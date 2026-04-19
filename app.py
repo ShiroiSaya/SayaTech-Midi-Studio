@@ -4,8 +4,7 @@ import multiprocessing
 import os
 import sys
 
-# 在 Windows + PyInstaller 冻结程序中，freeze_support() 必须尽早执行。
-# 这样工作进程会在导入 Qt 之前就被正确分流，避免子进程误走 GUI 启动链。
+# 在 Windows 冻结环境中尽早调用 freeze_support()，避免子进程误进入 GUI 启动流程。
 if __name__ == "__main__":
     multiprocessing.freeze_support()
 
@@ -115,6 +114,11 @@ class StartupSplash(QWidget):
 def main() -> int:
     global _QT_HANDLER
     install_global_hooks()
+
+    # 启动异步 GPU 初始化
+    from sayatech_modern.gpu_accel import start_gpu_init_async
+    start_gpu_init_async()
+
     append_runtime_log('Application starting.')
     try:
         if _maybe_auto_elevate():
