@@ -13,10 +13,11 @@ DEFAULT_ITEMS: List[tuple[str, str]] = [
     ("MAX_SIMULTANEOUS", "none"),
     ("RETRIGGER_GAP", "0.021"),
     ("HIGH_FREQ_COMPAT", "true"),
-    ("HIGH_FREQ_RELEASE_ADVANCE", "0.018"),
+    ("HIGH_FREQ_RELEASE_ADVANCE", "0.02"),
     ("RETRIGGER_MODE", "true"),
     ("RETRIGGER_PRIORITY", "latest"),
     ("INSTRUMENT_MODE", "钢琴"),
+    ("PURE_MODE", "false"),
     ("LEFTMOST_NOTE", "C3"),
     ("VISIBLE_OCTAVES", "3"),
     ("UNLOCKED_MIN_NOTE", "C3"),
@@ -33,7 +34,7 @@ DEFAULT_ITEMS: List[tuple[str, str]] = [
     ("PEDAL_ON_VALUE", "64"),
     ("PEDAL_TAP_TIME", "0.08"),
     ("FORCE_PEDAL_MODE", "关闭"),
-    ("FORCE_PEDAL_REPRESS_GAP", "0.038"),
+    ("FORCE_PEDAL_REPRESS_GAP", "0.07"),
     ("CHORD_PRIORITY", "false"),
     ("CHORD_SPLIT_THRESHOLD", "0.05"),
     ("OCTAVE_FOLD_PRIORITY", "true"),
@@ -122,17 +123,17 @@ SUPPORTED_FIELDS: List[FieldSpec] = [
     FieldSpec("SHIFT_HOLD_RELEASE_DELAY", "低音延迟释放", "float", "低音层保留", "切区后低音层延迟多久再抬起。太长会糊，太短又听不出层次。"),
     FieldSpec("OCTAVE_AVOID_COLLISION", "启用防撞", "bool", "高级模式", "尝试避免折返后与邻近音域撞到同一个键位。一般只在特殊曲子里再开。"),
     FieldSpec("OCTAVE_PREVIEW_NEIGHBORS", "邻近预览数量", "int", "高级模式", "看后面多少个邻近音来辅助防撞判断。0 代表关闭。"),
-    FieldSpec("HIGH_FREQ_COMPAT", "启用高频兼容", "bool", "高级模式", "遇到高密度音符时，允许提前抬起按键来换取更稳定的重新触发。现在默认开启，默认值 0.018 秒更稳；不需要时你也可以手动关闭。"),
-    FieldSpec("HIGH_FREQ_RELEASE_ADVANCE", "高频兼容提前抬起", "float", "高级模式", "把原本的抬键时间整体提前多少秒。默认 0.018 表示提前 18ms 抬起；自动调参不会改它。"),
+    FieldSpec("HIGH_FREQ_COMPAT", "启用高频兼容", "bool", "高级模式", "遇到高密度音符时，允许提前抬起按键来换取更稳定的重新触发。现在默认开启，默认值 0.02 秒更稳；不需要时你也可以手动关闭。"),
+    FieldSpec("HIGH_FREQ_RELEASE_ADVANCE", "高频兼容提前抬起", "float", "高级模式", "把原本的抬键时间整体提前多少秒。默认 0.02 表示提前 20ms 抬起；自动调参不会改它。"),
     FieldSpec("FORCE_PEDAL_MODE", "强制节拍踏板", "choice", "高级模式", "开启后会忽略 MIDI 自带踏板，改为按固定节拍自动重踩。适合原 MIDI 踏板写得太碎、太短或几乎没写的曲子。", ["关闭", "半拍", "整拍", "半小节", "整小节"]),
-    FieldSpec("FORCE_PEDAL_REPRESS_GAP", "强制踏板重踩间隔", "float", "高级模式", "控制相邻两次重新开踏板之间的总间隔。程序会在下一个目标拍点前先关踏板，到拍点时再重新开启。默认 0.038；低于 0.036 时，部分游戏可能会吞空格。"),
+    FieldSpec("FORCE_PEDAL_REPRESS_GAP", "强制踏板重踩间隔", "float", "高级模式", "控制相邻两次重新开踏板之间的总间隔。程序会在下一个目标拍点前先关踏板，到拍点时再重新开启。默认 0.07；太小的话，部分游戏可能会吞空格。"),
 ]
 
 FIELD_MAP = {spec.key: spec for spec in SUPPORTED_FIELDS}
 NOTE_FIELDS = {"LEFTMOST_NOTE", "UNLOCKED_MIN_NOTE", "UNLOCKED_MAX_NOTE", "SHIFT_HOLD_MAX_NOTE"}
 BOOL_FIELDS = {
     "USE_CONTEXT_REPLACE", "USE_VELOCITY_RULES", "USE_SMART_KEEP", "PREFER_CHANNEL_10",
-    "RETRIGGER_MODE", "AUTO_SHIFT_FROM_RANGE", "AUTO_TRANSPOSE", "USE_PEDAL", "USE_SHIFT_OCTAVE",
+    "PURE_MODE", "RETRIGGER_MODE", "AUTO_SHIFT_FROM_RANGE", "AUTO_TRANSPOSE", "USE_PEDAL", "USE_SHIFT_OCTAVE",
     "CHORD_PRIORITY", "OCTAVE_FOLD_PRIORITY", "BAR_AWARE_TRANSPOSE", "SHIFT_HOLD_BASS", "SHIFT_HOLD_CONFLICT_CLEAR",
     "MELODY_PRIORITY", "OCTAVE_AVOID_COLLISION", "HIGH_FREQ_COMPAT", "AUTO_ELEVATE",
 }
@@ -163,32 +164,68 @@ def parse_bool(v: Any) -> bool:
 
 
 def note_name_to_midi(name: str) -> int:
+    """将音名转换为MIDI音符编号"""
     s = name.strip().upper()
     if len(s) < 2:
-        raise ValueError(f"无效音名: {name}")
+        raise ValueError(f"无效音名: {name} (长度不足)")
+
+    # 解析音名和八度
     if len(s) == 2:
-        base, octave = s[0], s[1]
+        base, octave_str = s[0], s[1]
+    elif len(s) == 3:
+        base, octave_str = s[:2], s[2]
     else:
-        base, octave = s[:2], s[2]
-    return NOTE_NAME_MAP[base] + (int(octave) + 1) * 12
+        raise ValueError(f"无效音名格式: {name} (应为如 C4, C#4)")
+
+    # 验证音名
+    if base not in NOTE_NAME_MAP:
+        raise ValueError(f"无效音名: {base} (有效音名: {', '.join(sorted(NOTE_NAME_MAP.keys()))})")
+
+    # 验证八度
+    try:
+        octave = int(octave_str)
+    except ValueError:
+        raise ValueError(f"无效八度: {octave_str} (应为数字)")
+
+    # 验证八度范围
+    if not (-1 <= octave <= 8):
+        raise ValueError(f"八度超出范围: {octave} (应在 -1 到 8 之间)")
+
+    return NOTE_NAME_MAP[base] + (octave + 1) * 12
 
 
 def midi_to_note_name(note: int) -> str:
+    """将MIDI音符编号转换为音名"""
+    if not isinstance(note, int):
+        raise TypeError(f"MIDI音符编号必须是整数: {note}")
+
+    # MIDI音符范围验证 (0-127)
+    if not (0 <= note <= 127):
+        raise ValueError(f"MIDI音符编号超出范围: {note} (应在 0-127 之间)")
+
     return f"{NOTE_NAMES[note % 12]}{note // 12 - 1}"
 
 
 def parse_value(key: str, raw: Any) -> Any:
-    if key in NOTE_FIELDS:
-        return note_name_to_midi(str(raw))
-    if key in BOOL_FIELDS:
-        return parse_bool(raw)
-    if key in INT_FIELDS:
-        return int(str(raw).strip())
-    if key in FLOAT_FIELDS:
-        return float(str(raw).strip())
-    if key in LIST_FIELDS:
-        return [x.strip() for x in str(raw).split(",") if x.strip()]
-    return str(raw).strip()
+    """解析配置值，支持类型转换和验证"""
+    try:
+        if key in NOTE_FIELDS:
+            return note_name_to_midi(str(raw))
+        if key in BOOL_FIELDS:
+            return parse_bool(raw)
+        if key in INT_FIELDS:
+            return int(str(raw).strip())
+        if key in FLOAT_FIELDS:
+            return float(str(raw).strip())
+        if key in LIST_FIELDS:
+            return [x.strip() for x in str(raw).split(",") if x.strip()]
+        return str(raw).strip()
+    except (ValueError, TypeError) as exc:
+        # 记录错误但不中断，使用默认值
+        import logging
+        logging.warning(f"配置解析失败 {key}={raw}: {exc}")
+        # 返回原始字符串作为后备
+        return str(raw).strip()
 
 
 def serialize_value(key: str, value: Any) -> str:
