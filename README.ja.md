@@ -1,112 +1,65 @@
-<p align="center">
-  <img src="docs/assets/logo.png" alt="SayaTech-Midi-Studio Logo" width="160">
-</p>
+<div align="center">
 
-<h1 align="center">SayaTech-Midi-Studio</h1>
+<img src="docs/assets/logo.png" width="128" alt="SayaTech-Midi-Studio Logo">
 
-<p align="center">
-  <b>星痕共鳴</b>向けの Windows 用 MIDI 自動演奏ツール。<br>
-  <b>ピアノ / ギター / ベース / ドラム</b>、自動調整、合奏タイマー、テーマ切替、モダンなデスクトップ UI に対応。
-</p>
+# SayaTech-Midi-Studio
 
-<p align="center">
-  <a href="README.md">简体中文</a> ·
-  <a href="README.en.md">English</a> ·
-  <a href="README.ja.md">日本語</a>
-</p>
+**Windows 向けの MIDI 自動演奏スタジオ。ピアノ / ドラム演奏、自動調整、スプラッシュ画面、テーマ、ガラス風 UI を搭載。**
 
-<p align="center">
-  <a href="https://github.com/ShiroiSaya/SayaTech-Midi-Studio"><img alt="Repository" src="https://img.shields.io/badge/GitHub-Repository-181717?logo=github"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-green.svg"></a>
-</p>
+[简体中文](README.md) · [English](README.en.md) · [日本語](README.ja.md)
+[![Repository](https://img.shields.io/badge/GitHub-ShiroiSaya%2FSayaTech-Midi-Studio-181717?logo=github)](https://github.com/ShiroiSaya/SayaTech-Midi-Studio)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-<p align="center">
-  <img src="docs/assets/banner.png" alt="SayaTech-Midi-Studio Banner">
-</p>
+**リポジトリ:** <https://github.com/ShiroiSaya/SayaTech-Midi-Studio>
 
-## 概要
+```bash
+git clone https://github.com/ShiroiSaya/SayaTech-Midi-Studio.git
+cd SayaTech-Midi-Studio
+```
 
-SayaTech-Midi-Studio は、**星痕共鳴** のゲーム内楽器演奏向けに、MIDI ファイルをキーボード入力へ変換するデスクトップツールです。GUI を中心に構成されており、**ピアノ / ギター / ベース** と **ドラム** のワークスペース、音域適応、区間移動、サステイン処理、自動調整、合奏タイマー、可視化プレビューを備えています。
 
-単なるスクリプト集ではなく、日常利用と配布に適したデスクトップワークフローとして設計されています。
+<img src="docs/assets/banner.png" alt="SayaTech-Midi-Studio Banner">
 
-- GUI メイン画面とパラメータパネル
-- ピアノ / ギター / ベース用ワークスペース
-- ドラム用ワークスペース
-- MIDI トラック選択、ピアノロール表示、ドラムプレビュー
-- 自動調整と設定テンプレート
-- テーマ、ダークモード、ガラス風背景、スプラッシュ画面
-- リリース向けのパッケージ化とインストーラスクリプト
+</div>
 
 ## プレビュー
 
-### メイン画面
+アプリケーションはモダンなフロストガラス風インターフェースデザインを採用し、ライトモードとダークモードの両方に対応しています。
 
-![Home](docs/assets/screenshot-home-empty.png)
-
-### ピアノ / ギター / ベース画面
-
-![Piano Guitar Bass](docs/assets/screenshot-piano.png)
-
-### ドラム画面
-
-![Drum](docs/assets/screenshot-drum.png)
-
-### 設定画面
-
-![Settings](docs/assets/screenshot-settings.png)
-
-### スプラッシュ画面
-
-![Splash](docs/assets/screenshot-splash.png)
-
-### ダークモード
-
-![Dark Mode](docs/assets/screenshot-dark.png)
+- **メイン画面**：ピアノ、ドラムワークスペース、設定パネルへの素早い切り替えが可能なクリアなナビゲーションバー
+- **ピアノワークスペース**：リアルタイムの MIDI ノート表示、ベロシティパラメータ、時間ウィンドウ設定、自動チューニング機能対応
+- **ドラムワークスペース**：独立したドラムキットパラメータ設定、複数のドラム音色と演奏モードに対応
+- **設定パネル**：ホットキーバインディング、テーマ選択、起動オプションなどを含む統一設定センター
+- **スプラッシュ画面**：オプションのアニメーション起動画面でアプリケーション起動体験を向上
+- **ダークモード**：背景画像を自動的に無効化して可読性を向上、快適な夜間使用体験を提供
 
 ## 主な機能
 
-### 演奏と再生
-
-- ピアノ / ギター / ベース MIDI 自動演奏
+- ピアノ MIDI 自動演奏
 - ドラム MIDI 自動演奏
-- 再生 / 一時停止 / 停止ホットキー
-- MIDI トラックの選別と推奨
-- ピアノロール、ドラムプレビュー、タイムラインによる位置確認
-
-### 音域とキー適応
-
-- 演奏可能音域の自動適応
-- 区間移動と短区間固定ウィンドウのロジック
-- サステイン処理と再トリガー制御
-- ピアノ / ギター / ベース用とドラム用の独立パラメータ
-- 編集可能な `config.txt` と既定テンプレート
-
-### 合奏と補助機能
-
-- 合奏タイマー
-- 北京時間の同期
-- 自動調整とパラメータ提案
-- 実行ログとクラッシュログ
-
-### UI / 体験
-
-- 複数テーマ
-- ダークモード
-- ガラス風背景効果
-- 任意で使えるスプラッシュ画面
-- より分かりやすいパラメータ名とホバー説明
+- 自動チューニングとパラメータ提案
+- 短音域向け固定ウィンドウロジック
+- 北京時間同期付きの合奏タイマー
+- ホットキーのカスタマイズ
+- 複数テーマ、ダークモード、ガラス風 UI
+- オプションのスプラッシュ画面
+- ホバー説明と分かりやすいパラメータ名
+- クラッシュログと実行ログ
 
 ## 動作環境
 
 - Windows 10 / 11
 - Python 3.10+
-- PySide6 デスクトップ GUI 環境
-- **星痕共鳴** で MIDI をキーボード入力へ変換して演奏する用途向け
+- PySide6 ベースの GUI 環境
+- ゲームやウィンドウへキーボード入力を送る用途に適しています
 
-## インストールと実行
+## ダウンロードと Release
 
-### ソースから実行
+- GitHub Releases に掲載する推奨インストーラー名: `SayaTech_MIDI_Studio_Setup.exe`
+- 単体実行版のファイル名: `SayaTech_MIDI_Studio.exe`
+- 推奨 Release ページ: <https://github.com/ShiroiSaya/SayaTech-Midi-Studio/releases>
+
+## クイックスタート
 
 ```bash
 git clone https://github.com/ShiroiSaya/SayaTech-Midi-Studio.git
@@ -115,29 +68,24 @@ pip install -r requirements.txt
 python app.py
 ```
 
-### Release の命名
-
-ソースリポジトリには通常ビルド済みバイナリは含みません。推奨される配布ファイル名は次の通りです。
-
-- `SayaTech_MIDI_Studio_Setup.exe`：Windows インストーラ
-- `SayaTech_MIDI_Studio.exe`：単一ファイル版
-
-Releases: <https://github.com/ShiroiSaya/SayaTech-Midi-Studio/releases>
-
 ## ビルド
 
-### 単一ファイル EXE
+### 単一 EXE
+同梱のビルドスクリプト、または PyInstaller でパッケージ化できます。出力ファイル名は `dist/SayaTech_MIDI_Studio.exe` です。
 
-付属スクリプト、または PyInstaller を使ってビルドできます。
+### インストーラー版
+起動速度を優先する場合は、`onedir + Inno Setup` の構成がおすすめです。インストーラーの出力ファイル名は `installer_output/SayaTech_MIDI_Studio_Setup.exe` に固定されています。
 
-- 出力先：`dist/SayaTech_MIDI_Studio.exe`
+## ハイライト
 
-### インストーラ版
+このプロジェクトは単なるスクリプト集ではなく、MIDI 自動演奏のための一連のワークフローを提供します。
 
-起動速度と配布の安定性を考えると、`onedir + Inno Setup` の構成を推奨します。
-
-- ディレクトリ版：`dist/SayaTech_MIDI_Studio/`
-- インストーラ出力：`installer_output/SayaTech_MIDI_Studio_Setup.exe`
+- 統一されたデスクトップ UI
+- ピアノ / ドラムの独立ワークスペース
+- 実行時パラメータと連動する自動チューナー
+- 一元化された設定画面
+- スプラッシュ画面とテーマ切替
+- 配布向けのパッケージング手段
 
 ## リポジトリ構成
 
@@ -159,11 +107,16 @@ Releases: <https://github.com/ShiroiSaya/SayaTech-Midi-Studio/releases>
 
 ## 補足
 
-- ライトモードでは背景画像とガラス風効果を利用できます
-- ダークモードでは可読性と安定性のため背景画像を自動で無効化します
-- アプリはまず `config.txt` を読み込み、存在しない場合は既定テンプレートを自動生成します
-- README に掲載している画面キャプチャは現行バージョンの UI です
+- ライトモードでは背景画像とガラス効果が使えます
+- ダークモードでは可読性のため背景画像を自動で無効化します
+- 初回起動時はリポジトリ内の `config.txt` を優先して読み込み、存在しない場合は既定テンプレートから再生成します
+- README のスクリーンショットは最近の UI バージョンから取得しています
+- Release には `SayaTech_MIDI_Studio_Setup.exe` をアップロードする構成を想定しており、ビルド済みバイナリはソースリポジトリに含めません
 
 ## License
 
-このプロジェクトは MIT License の下で公開されています。詳細は [LICENSE](LICENSE) を参照してください。
+このプロジェクトは **MIT License** で公開されています。詳細は [LICENSE](LICENSE) をご確認ください。
+
+## Dependencies
+
+実行時とパッケージング時の依存関係は [requirements.txt](requirements.txt) にまとめてあります。

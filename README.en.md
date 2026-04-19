@@ -1,112 +1,65 @@
-<p align="center">
-  <img src="docs/assets/logo.png" alt="SayaTech-Midi-Studio Logo" width="160">
-</p>
+<div align="center">
 
-<h1 align="center">SayaTech-Midi-Studio</h1>
+<img src="docs/assets/logo.png" width="128" alt="SayaTech-Midi-Studio Logo">
 
-<p align="center">
-  A Windows MIDI auto-performance tool for <b>Star Resonance</b>.<br>
-  Supports <b>Piano / Guitar / Bass / Drum</b>, auto tuning, ensemble timing, themes, and a modern desktop UI.
-</p>
+# SayaTech-Midi-Studio
 
-<p align="center">
-  <a href="README.md">简体中文</a> ·
-  <a href="README.en.md">English</a> ·
-  <a href="README.ja.md">日本語</a>
-</p>
+**A Windows MIDI auto-play studio with piano / drum playback, auto tuning, splash screen, themes, and glass-style UI.**
 
-<p align="center">
-  <a href="https://github.com/ShiroiSaya/SayaTech-Midi-Studio"><img alt="Repository" src="https://img.shields.io/badge/GitHub-Repository-181717?logo=github"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-green.svg"></a>
-</p>
+[简体中文](README.md) · [English](README.en.md) · [日本語](README.ja.md)
+[![Repository](https://img.shields.io/badge/GitHub-ShiroiSaya%2FSayaTech-Midi-Studio-181717?logo=github)](https://github.com/ShiroiSaya/SayaTech-Midi-Studio)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-<p align="center">
-  <img src="docs/assets/banner.png" alt="SayaTech-Midi-Studio Banner">
-</p>
+**Repository:** <https://github.com/ShiroiSaya/SayaTech-Midi-Studio>
 
-## Overview
+```bash
+git clone https://github.com/ShiroiSaya/SayaTech-Midi-Studio.git
+cd SayaTech-Midi-Studio
+```
 
-SayaTech-Midi-Studio converts MIDI files into keyboard input for in-game instrument performance in **Star Resonance**. The project is built around a desktop GUI and provides workspaces for **Piano / Guitar / Bass** and **Drum**, together with range adaptation, interval movement, sustain pedal handling, auto tuning, ensemble timing, and visual previews.
 
-It is not just a packaged script. It is a desktop workflow designed for daily use and distribution:
+<img src="docs/assets/banner.png" alt="SayaTech-Midi-Studio Banner">
 
-- GUI main window and parameter panels
-- Piano / Guitar / Bass workspace
-- Drum workspace
-- MIDI track selection, piano-roll preview, and drum preview
-- Auto tuning and config templates
-- Themes, dark mode, glass effects, and splash screen
-- Packaging and installer scripts for release builds
+</div>
 
 ## Preview
 
-### Main Window
+The application features a modern frosted glass interface design with support for both light and dark themes.
 
-![Home](docs/assets/screenshot-home-empty.png)
-
-### Piano / Guitar / Bass Page
-
-![Piano Guitar Bass](docs/assets/screenshot-piano.png)
-
-### Drum Page
-
-![Drum](docs/assets/screenshot-drum.png)
-
-### Settings Page
-
-![Settings](docs/assets/screenshot-settings.png)
-
-### Splash Screen
-
-![Splash](docs/assets/screenshot-splash.png)
-
-### Dark Mode
-
-![Dark Mode](docs/assets/screenshot-dark.png)
+- **Main Interface**: Clear navigation bar for quick switching between piano, drum workspaces, and settings panel
+- **Piano Workspace**: Real-time MIDI note display, velocity parameters, time window settings, with automatic tuning support
+- **Drum Workspace**: Independent drum kit parameter configuration, supporting multiple drum sounds and playback modes
+- **Settings Panel**: Unified configuration center including hotkey bindings, theme selection, startup options, and more
+- **Splash Screen**: Optional animated startup screen for enhanced application launch experience
+- **Dark Mode**: Automatically disables background images for better readability, providing a comfortable night-time experience
 
 ## Features
 
-### Performance and Playback
-
-- Piano / Guitar / Bass MIDI auto-play
+- Piano MIDI auto-play
 - Drum MIDI auto-play
-- Play / Pause / Stop hotkeys
-- MIDI track filtering and recommendations
-- Piano-roll preview, drum preview, and timeline-assisted seeking
-
-### Range and Key Mapping
-
-- Automatic playable-range adaptation
-- Interval movement and short-range fixed-window logic
-- Sustain pedal handling and retrigger control
-- Separate parameter sets for Piano / Guitar / Bass and Drum
-- Default templates with editable `config.txt`
-
-### Ensemble and Tools
-
-- Ensemble scheduling
-- Beijing time sync
-- Auto tuning and parameter suggestions
-- Runtime logs and crash logs
-
-### UI Experience
-
-- Multiple themes
-- Dark mode
-- Glass background effect
+- Automatic parameter tuning and suggestions
+- Short-range fixed-window logic
+- Ensemble timer with Beijing time sync
+- Configurable hotkeys
+- Multiple themes, dark mode, and glass UI
 - Optional splash screen
-- Clearer parameter naming and hover hints
+- Hover tooltips and clearer parameter naming
+- Crash logs and runtime logs
 
 ## Environment
 
 - Windows 10 / 11
 - Python 3.10+
-- PySide6 desktop GUI environment
-- Intended for instrument performance in **Star Resonance**, where MIDI is mapped to keyboard input
+- PySide6-based GUI environment
+- Suitable for scenarios that send keyboard input to games or windows
 
-## Installation and Run
+## Downloads and Releases
 
-### Run from Source
+- Recommended installer filename for GitHub Releases: `SayaTech_MIDI_Studio_Setup.exe`
+- Portable one-file build: `SayaTech_MIDI_Studio.exe`
+- Suggested Releases page: <https://github.com/ShiroiSaya/SayaTech-Midi-Studio/releases>
+
+## Quick Start
 
 ```bash
 git clone https://github.com/ShiroiSaya/SayaTech-Midi-Studio.git
@@ -115,29 +68,24 @@ pip install -r requirements.txt
 python app.py
 ```
 
-### Release Naming
-
-Source repositories do not include built binaries by default. Recommended release filenames:
-
-- `SayaTech_MIDI_Studio_Setup.exe`: Windows installer
-- `SayaTech_MIDI_Studio.exe`: single-file portable build
-
-Releases: <https://github.com/ShiroiSaya/SayaTech-Midi-Studio/releases>
-
 ## Build
 
-### Single-file EXE
+### One-file EXE
+You can use the included build scripts or package the app with PyInstaller directly. The output filename is `dist/SayaTech_MIDI_Studio.exe`.
 
-Build with the included scripts or directly with PyInstaller:
+### Installer
+Using `onedir + Inno Setup` is recommended for a faster launch experience than a single-file build. The installer output filename is fixed as `installer_output/SayaTech_MIDI_Studio_Setup.exe`.
 
-- Output: `dist/SayaTech_MIDI_Studio.exe`
+## Highlights
 
-### Installer Build
+This project is more than a simple script pack. It provides a complete MIDI auto-play workflow:
 
-Using `onedir + Inno Setup` is recommended for faster startup and more stable distribution:
-
-- Directory build: `dist/SayaTech_MIDI_Studio/`
-- Installer output: `installer_output/SayaTech_MIDI_Studio_Setup.exe`
+- Unified desktop UI
+- Separate piano and drum workspaces
+- Auto tuner linked with runtime parameters
+- Centralized settings panel
+- Splash screen and visual themes
+- Packaging options suitable for distribution
 
 ## Repository Structure
 
@@ -159,11 +107,16 @@ Using `onedir + Inno Setup` is recommended for faster startup and more stable di
 
 ## Notes
 
-- Light mode supports a background image and glass effects
-- Dark mode disables the background automatically for readability and stability
-- The app reads `config.txt` first; if it is missing, a default template is generated automatically
-- The screenshots in this README are taken from the current project UI
+- Background image and glass effects are available in light mode
+- Dark mode automatically disables the background image for better readability
+- The app prefers the tracked `config.txt` in the repository; if it is missing, it will regenerate one from the default template
+- All screenshots in this README are from a recent version of the UI
+- For Releases, it is recommended to upload `SayaTech_MIDI_Studio_Setup.exe`; prebuilt binaries are not committed to the source repository
 
 ## License
 
-This project is released under the MIT License. See [LICENSE](LICENSE) for details.
+This project is released under the **MIT License**. See [LICENSE](LICENSE) for details.
+
+## Dependencies
+
+Runtime and packaging dependencies are listed in [requirements.txt](requirements.txt).
