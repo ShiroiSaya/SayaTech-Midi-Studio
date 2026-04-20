@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Sequence, Tuple, Tuple
 
 from .crash_logging import append_runtime_log, write_crash_log
-from .cache_store import load_pickle, make_key, save_pickle, stable_hash_payload
 from .models import DrumPlanReport, MidiAnalysisResult, NoteSpan, PedalEvent
 
 try:  # pragma: no cover - runtime dependency on Windows host
@@ -812,31 +811,10 @@ class ModernPianoBackend(LiveBackendBase):
         })
 
     def _load_disk_actions(self, analysis: Optional[MidiAnalysisResult], stage: str) -> Optional[tuple[List[PianoAction], List[float]]]:
-        disk_key = self._disk_cache_key(analysis, stage)
-        if not disk_key:
-            return None
-        payload = load_pickle("actions", disk_key)
-        if not isinstance(payload, dict):
-            return None
-        actions = payload.get("actions")
-        action_times = payload.get("action_times")
-        if not isinstance(actions, list) or not isinstance(action_times, list):
-            return None
-        return actions, [float(v) for v in action_times]
+        return None
 
     def _save_disk_actions(self, analysis: Optional[MidiAnalysisResult], stage: str, actions: Sequence[PianoAction], action_times: Sequence[float]) -> None:
-        disk_key = self._disk_cache_key(analysis, stage)
-        if not disk_key:
-            return
-        try:
-            save_pickle("actions", disk_key, {
-                "actions": list(actions),
-                "action_times": [float(v) for v in action_times],
-            }, meta={
-                "kind": "actions",
-                "stage": str(stage),
-                "analysis": str(getattr(analysis, "analysis_cache_key", "") or getattr(analysis, "source_sha256", "") or ""),
-            })
+        pass
         except Exception:
             pass
 
@@ -1870,22 +1848,10 @@ class ModernDrumBackend(LiveBackendBase):
         })
 
     def _load_disk_value(self, analysis: Optional[MidiAnalysisResult], kind: str):
-        key = self._disk_cache_key(analysis, kind)
-        if not key:
-            return None
-        return load_pickle("drum_reports", key)
+        return None
 
     def _save_disk_value(self, analysis: Optional[MidiAnalysisResult], kind: str, value) -> None:
-        key = self._disk_cache_key(analysis, kind)
-        if not key:
-            return
-        try:
-            save_pickle("drum_reports", key, value, meta={
-                "kind": str(kind),
-                "analysis": str(getattr(analysis, "analysis_cache_key", "") or getattr(analysis, "source_sha256", "") or ""),
-            })
-        except Exception:
-            pass
+        pass
 
     def build_plan_report(self, analysis: Optional[MidiAnalysisResult]) -> DrumPlanReport:
         if analysis is None or not analysis.notes:
