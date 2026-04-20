@@ -221,7 +221,9 @@ def _build_track_raw_bars_with_backend(
             for row_idx, track_key in enumerate(track_keys)
         }
         return raw_bars_by_track, active_by_track, backend
-    except Exception:
+    except Exception as e:
+        from .crash_logging import append_runtime_log
+        append_runtime_log(f"GPU加速计算失败，回退到CPU: {type(e).__name__}: {str(e)}", debug=True)
         return None
 
 

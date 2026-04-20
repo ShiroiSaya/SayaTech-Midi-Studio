@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Sequence, Tuple, Tuple
 
 from .crash_logging import append_runtime_log, write_crash_log
-from .cache_store import load_pickle, make_key, save_pickle, stable_hash_payload
 from .models import DrumPlanReport, MidiAnalysisResult, NoteSpan, PedalEvent
 
 try:  # pragma: no cover - runtime dependency on Windows host
@@ -886,65 +885,12 @@ class ModernPianoBackend(LiveBackendBase):
                 return self._fast_action_times_cache
         return None
 
-    def _disk_cache_key(self, analysis: Optional[MidiAnalysisResult], stage: str) -> Optional[str]:
-        if analysis is None or self._config_signature is None:
-            return None
-        analysis_key = str(getattr(analysis, "analysis_cache_key", "") or "")
-        if not analysis_key:
-            analysis_key = str(getattr(analysis, "source_sha256", "") or "")
-        if not analysis_key:
-            return None
-        pure_cache_version = 3 if getattr(self, 'pure_mode', False) else 2
-        return make_key("actions", {
-            "analysis": analysis_key,
-            "stage": str(stage),
-            "backend": "piano_actions",
-            "config_signature": stable_hash_payload(self._config_signature),
-            "pure_cache_version": pure_cache_version,
-        })
-
-    def _load_disk_actions(self, analysis: Optional[MidiAnalysisResult], stage: str) -> Optional[tuple[List[PianoAction], List[float]]]:
-        disk_key = self._disk_cache_key(analysis, stage)
-        if not disk_key:
-            return None
-        payload = load_pickle("actions", disk_key)
-        if not isinstance(payload, dict):
-            return None
-        actions = payload.get("actions")
-        action_times = payload.get("action_times")
-        if not isinstance(actions, list) or not isinstance(action_times, list):
-            return None
-        return actions, [float(v) for v in action_times]
-
-    def _save_disk_actions(self, analysis: Optional[MidiAnalysisResult], stage: str, actions: Sequence[PianoAction], action_times: Sequence[float]) -> None:
-        disk_key = self._disk_cache_key(analysis, stage)
-        if not disk_key:
-            return
-        try:
-            save_pickle("actions", disk_key, {
-                "actions": list(actions),
-                "action_times": [float(v) for v in action_times],
-            }, meta={
-                "kind": "actions",
-                "stage": str(stage),
-                "analysis": str(getattr(analysis, "analysis_cache_key", "") or getattr(analysis, "source_sha256", "") or ""),
-            })
-        except Exception:
-            pass
-
     def _best_cached_plan(self, cache_key: Optional[tuple], analysis: Optional[MidiAnalysisResult]) -> tuple[Optional[List[PianoAction]], Optional[List[float]], str]:
         with self._cache_lock:
             if self._has_full_cache(cache_key):
                 return self._actions_cache, self._action_times_cache, "full"
             if self._has_fast_cache(cache_key):
                 return self._fast_actions_cache, self._fast_action_times_cache, "fast"
-        if analysis is not None:
-            disk_full = self._load_disk_actions(analysis, "full")
-            if disk_full is not None:
-                return disk_full[0], disk_full[1], "full"
-            disk_fast = self._load_disk_actions(analysis, "fast")
-            if disk_fast is not None:
-                return disk_fast[0], disk_fast[1], "fast"
         return None, None, ""
 
     def _bind_handle_snapshot(self, handle: BackendPlaybackHandle, analysis: Optional[MidiAnalysisResult]) -> None:
@@ -962,6 +908,8 @@ class ModernPianoBackend(LiveBackendBase):
 
     def invalidate_handle_snapshot(self, handle: Optional[BackendPlaybackHandle]) -> None:
         if handle is None:
+            return
+        if not isinstance(handle, BackendPlaybackHandle):
             return
         handle.actions_snapshot = None
         handle.action_times_snapshot = None
@@ -1004,7 +952,6 @@ class ModernPianoBackend(LiveBackendBase):
                 self._prewarm_stage = 'idle'
             if self._pending_prewarm is not None and self._pending_prewarm[0] == expected_key:
                 self._pending_prewarm = None
-        self._save_disk_actions(analysis, "full", actions, action_times)
         return True
 
     def _ensure_action_cache(self) -> List[PianoAction]:
@@ -1014,42 +961,6 @@ class ModernPianoBackend(LiveBackendBase):
             return cached
         if not self.analysis:
             return []
-        if self.pure_mode:
-            disk_full = self._load_disk_actions(self.analysis, "full")
-            if disk_full is not None:
-                actions, action_times = disk_full
-            else:
-                actions = self._build_actions(self.analysis.notes, self.analysis.pedal_events, fast_mode=True, analysis=self.analysis)
-                action_times = [a.t for a in actions]
-                self._save_disk_actions(self.analysis, "full", actions, action_times)
-            with self._cache_lock:
-                if cache_key is not None and cache_key == self._current_action_cache_key():
-                    self._actions_cache = actions
-                    self._action_times_cache = action_times
-                    self._actions_cache_key = cache_key
-                    self._fast_actions_cache = actions
-                    self._fast_action_times_cache = action_times
-                    self._fast_actions_cache_key = cache_key
-            return actions
-        disk_full = self._load_disk_actions(self.analysis, "full")
-        if disk_full is not None:
-            actions, action_times = disk_full
-            with self._cache_lock:
-                if cache_key is not None and cache_key == self._current_action_cache_key():
-                    self._actions_cache = actions
-                    self._action_times_cache = action_times
-                    self._actions_cache_key = cache_key
-            return actions
-        disk_fast = self._load_disk_actions(self.analysis, "fast")
-        if disk_fast is not None:
-            actions, action_times = disk_fast
-            with self._cache_lock:
-                if cache_key is not None and cache_key == self._current_action_cache_key():
-                    self._fast_actions_cache = actions
-                    self._fast_action_times_cache = action_times
-                    self._fast_actions_cache_key = cache_key
-            self._schedule_action_cache_prewarm()
-            return actions
         actions = self._build_actions(self.analysis.notes, self.analysis.pedal_events, fast_mode=True, analysis=self.analysis)
         action_times = [a.t for a in actions]
         with self._cache_lock:
@@ -1057,8 +968,12 @@ class ModernPianoBackend(LiveBackendBase):
                 self._fast_actions_cache = actions
                 self._fast_action_times_cache = action_times
                 self._fast_actions_cache_key = cache_key
-        self._save_disk_actions(self.analysis, "fast", actions, action_times)
-        self._schedule_action_cache_prewarm()
+                if self.pure_mode:
+                    self._actions_cache = actions
+                    self._action_times_cache = action_times
+                    self._actions_cache_key = cache_key
+        if not self.pure_mode:
+            self._schedule_action_cache_prewarm()
         return actions
 
     def _schedule_action_cache_prewarm(self) -> None:
@@ -1110,13 +1025,8 @@ class ModernPianoBackend(LiveBackendBase):
                     full_ready = self._has_full_cache(target_key)
                 try:
                     if not fast_ready:
-                        disk_fast = self._load_disk_actions(analysis_obj, "fast")
-                        if disk_fast is not None:
-                            fast_actions, fast_action_times = disk_fast
-                        else:
-                            fast_actions = self._build_actions(analysis_obj.notes, analysis_obj.pedal_events, fast_mode=True, analysis=analysis_obj)
-                            fast_action_times = [a.t for a in fast_actions]
-                            self._save_disk_actions(analysis_obj, "fast", fast_actions, fast_action_times)
+                        fast_actions = self._build_actions(analysis_obj.notes, analysis_obj.pedal_events, fast_mode=True, analysis=analysis_obj)
+                        fast_action_times = [a.t for a in fast_actions]
                         with self._cache_lock:
                             if self._current_action_cache_key() == target_key:
                                 self._fast_actions_cache = fast_actions
@@ -1129,13 +1039,8 @@ class ModernPianoBackend(LiveBackendBase):
                             continue
                         self._prewarm_stage = 'full'
                     if not full_ready:
-                        disk_full = self._load_disk_actions(analysis_obj, "full")
-                        if disk_full is not None:
-                            actions, action_times = disk_full
-                        else:
-                            actions = self._build_actions(analysis_obj.notes, analysis_obj.pedal_events, fast_mode=False, analysis=analysis_obj)
-                            action_times = [a.t for a in actions]
-                            self._save_disk_actions(analysis_obj, "full", actions, action_times)
+                        actions = self._build_actions(analysis_obj.notes, analysis_obj.pedal_events, fast_mode=False, analysis=analysis_obj)
+                        action_times = [a.t for a in actions]
                         with self._cache_lock:
                             if self._current_action_cache_key() == target_key:
                                 self._actions_cache = actions
@@ -2196,36 +2101,6 @@ class ModernDrumBackend(LiveBackendBase):
             return None
         return (id(analysis), self._config_signature)
 
-    def _disk_cache_key(self, analysis: Optional[MidiAnalysisResult], kind: str) -> Optional[str]:
-        if analysis is None or self._config_signature is None:
-            return None
-        analysis_key = str(getattr(analysis, "analysis_cache_key", "") or getattr(analysis, "source_sha256", "") or "")
-        if not analysis_key:
-            return None
-        return make_key("drum_reports", {
-            "analysis": analysis_key,
-            "kind": str(kind),
-            "backend": "drum",
-            "config_signature": stable_hash_payload(self._config_signature),
-        })
-
-    def _load_disk_value(self, analysis: Optional[MidiAnalysisResult], kind: str):
-        key = self._disk_cache_key(analysis, kind)
-        if not key:
-            return None
-        return load_pickle("drum_reports", key)
-
-    def _save_disk_value(self, analysis: Optional[MidiAnalysisResult], kind: str, value) -> None:
-        key = self._disk_cache_key(analysis, kind)
-        if not key:
-            return
-        try:
-            save_pickle("drum_reports", key, value, meta={
-                "kind": str(kind),
-                "analysis": str(getattr(analysis, "analysis_cache_key", "") or getattr(analysis, "source_sha256", "") or ""),
-            })
-        except Exception:
-            pass
 
     def build_plan_report(self, analysis: Optional[MidiAnalysisResult]) -> DrumPlanReport:
         if analysis is None or not analysis.notes:
@@ -2233,11 +2108,6 @@ class ModernDrumBackend(LiveBackendBase):
         cache_key = self._cache_key_for_analysis(analysis)
         if cache_key is not None and cache_key == self._report_cache_key and self._report_cache is not None:
             return self._report_cache
-        cached = self._load_disk_value(analysis, "report")
-        if isinstance(cached, DrumPlanReport):
-            self._report_cache = cached
-            self._report_cache_key = cache_key
-            return cached
         ordered = sorted(analysis.notes, key=lambda n: (n.start_sec, -n.velocity, n.midi_note))
         note_counter: Counter[int] = Counter()
         mapped_counter: Counter[str] = Counter()
@@ -2355,11 +2225,6 @@ class ModernDrumBackend(LiveBackendBase):
         cache_key = self._cache_key_for_analysis(analysis)
         if cache_key is not None and cache_key == self._hits_cache_key and self._hits_cache is not None:
             return list(self._hits_cache)
-        cached = self._load_disk_value(analysis, "hits") if analysis is not None else None
-        if isinstance(cached, list) and all(isinstance(item, DrumHit) for item in cached):
-            self._hits_cache = list(cached)
-            self._hits_cache_key = cache_key
-            return list(cached)
         ordered = sorted(notes, key=lambda n: (n.start_sec, -n.velocity, n.midi_note))
         groups: List[List[NoteSpan]] = []
         current: List[NoteSpan] = []

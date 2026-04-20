@@ -10,7 +10,6 @@ import sys
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .backend import BASS_PLAYABLE_COUNT, BASS_PLAYABLE_START_OFFSET, ModernPianoBackend
-from .cache_store import freeze_value, load_pickle, make_key, save_pickle
 from .gpu_accel import resolve_compute_backend
 from .config_io import midi_to_note_name
 from .models import MidiAnalysisResult, NoteSpan
@@ -43,12 +42,7 @@ DEFAULT_RETRIGGER_GAP = 0.021
 
 
 def _tuner_cache_key(analysis: MidiAnalysisResult, current_config: Dict[str, Any], playable_range: Tuple[int, int]) -> str:
-    analysis_key = str(getattr(analysis, "analysis_cache_key", "") or getattr(analysis, "source_sha256", "") or analysis.file_path)
-    return make_key("tuner", {
-        "analysis": analysis_key,
-        "playable_range": (int(playable_range[0]), int(playable_range[1])),
-        "config": freeze_value(current_config),
-    })
+    return ""
 
 
 
@@ -1380,7 +1374,7 @@ def suggest_config(
 
     playable_key = (user_min, user_max)
     cache_key = _tuner_cache_key(analysis, current_config, playable_key)
-    cached_payload = load_pickle("tuner", cache_key)
+    cached_payload = None
     compute_backend = resolve_compute_backend(use_gpu)
     tuner = MultiCandidateTuner(analysis, current_config, playable_key, use_gpu=use_gpu)
     if isinstance(cached_payload, dict) and all(k in cached_payload for k in ("best", "best_score", "best_detail", "tested")):
@@ -1391,15 +1385,6 @@ def suggest_config(
         best_detail.setdefault("probe_backend", "本地缓存命中")
     else:
         best, best_score, best_detail, tested = tuner.tune()
-        try:
-            save_pickle("tuner", cache_key, {
-                "best": dict(best),
-                "best_score": float(best_score),
-                "best_detail": dict(best_detail),
-                "tested": int(tested),
-            }, meta={"kind": "tuner", "analysis": str(getattr(analysis, "analysis_cache_key", "") or getattr(analysis, "source_sha256", "") or ""), "playable_range": [int(user_min), int(user_max)]})
-        except Exception:
-            pass
     feat = tuner.feat
     filename = analysis.file_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
 
