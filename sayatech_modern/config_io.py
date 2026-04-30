@@ -33,6 +33,7 @@ DEFAULT_ITEMS: List[tuple[str, str]] = [
     ("USE_PEDAL", "true"),
     ("PEDAL_ON_VALUE", "64"),
     ("PEDAL_TAP_TIME", "0.08"),
+    ("PEDAL_HOLD_MODE", "false"),
     ("FORCE_PEDAL_MODE", "关闭"),
     ("FORCE_PEDAL_REPRESS_GAP", "0.07"),
     ("CHORD_PRIORITY", "false"),
@@ -55,16 +56,12 @@ DEFAULT_ITEMS: List[tuple[str, str]] = [
     ("MELODY_KEEP_TOP", "2"),
     ("OCTAVE_AVOID_COLLISION", "false"),
     ("OCTAVE_PREVIEW_NEIGHBORS", "0"),
-    ("BASE_TAP_HOLD", "0.010"),
     ("SAME_TIME_WINDOW", "0.008"),
     ("DENSITY_LIMIT_HZ", "42.0"),
-    ("COARSE_GROUP_WINDOW", "0.065"),
-    ("ACCENT_VELOCITY", "108"),
-    ("GHOST_VELOCITY", "42"),
     ("USE_CONTEXT_REPLACE", "true"),
-    ("USE_VELOCITY_RULES", "true"),
     ("USE_SMART_KEEP", "true"),
     ("PREFER_CHANNEL_10", "true"),
+    ("PLAYBACK_SPEED", "100"),
         ("GUI_TITLE", "SayaTech MIDI 自动弹奏"),
     ("INPUT_BACKEND", "sendinput"),
 ]
@@ -127,23 +124,24 @@ SUPPORTED_FIELDS: List[FieldSpec] = [
     FieldSpec("HIGH_FREQ_RELEASE_ADVANCE", "高频兼容提前抬起", "float", "高级模式", "把原本的抬键时间整体提前多少秒。默认 0.02 表示提前 20ms 抬起；自动调参不会改它。"),
     FieldSpec("FORCE_PEDAL_MODE", "强制节拍踏板", "choice", "高级模式", "开启后会忽略 MIDI 自带踏板，改为按固定节拍自动重踩。适合原 MIDI 踏板写得太碎、太短或几乎没写的曲子。", ["关闭", "半拍", "整拍", "半小节", "整小节"]),
     FieldSpec("FORCE_PEDAL_REPRESS_GAP", "强制踏板重踩间隔", "float", "高级模式", "控制相邻两次重新开踏板之间的总间隔。程序会在下一个目标拍点前先关踏板，到拍点时再重新开启。默认 0.07；太小的话，部分游戏可能会吞空格。"),
+    FieldSpec("PLAYBACK_SPEED", "演奏速度", "int", "演奏设置", "演奏速度百分比，50-300。100为原速，大于100加速，小于100减速。实时生效。"),
 ]
 
 FIELD_MAP = {spec.key: spec for spec in SUPPORTED_FIELDS}
 NOTE_FIELDS = {"LEFTMOST_NOTE", "UNLOCKED_MIN_NOTE", "UNLOCKED_MAX_NOTE", "SHIFT_HOLD_MAX_NOTE"}
 BOOL_FIELDS = {
-    "USE_CONTEXT_REPLACE", "USE_VELOCITY_RULES", "USE_SMART_KEEP", "PREFER_CHANNEL_10",
+    "USE_CONTEXT_REPLACE", "USE_SMART_KEEP", "PREFER_CHANNEL_10",
     "PURE_MODE", "RETRIGGER_MODE", "AUTO_SHIFT_FROM_RANGE", "AUTO_TRANSPOSE", "USE_PEDAL", "USE_SHIFT_OCTAVE",
     "CHORD_PRIORITY", "OCTAVE_FOLD_PRIORITY", "BAR_AWARE_TRANSPOSE", "SHIFT_HOLD_BASS", "SHIFT_HOLD_CONFLICT_CLEAR",
-    "MELODY_PRIORITY", "OCTAVE_AVOID_COLLISION", "HIGH_FREQ_COMPAT", "AUTO_ELEVATE",
+    "MELODY_PRIORITY", "OCTAVE_AVOID_COLLISION", "HIGH_FREQ_COMPAT", "PEDAL_HOLD_MODE",
 }
 INT_FIELDS = {
-    "ACCENT_VELOCITY", "GHOST_VELOCITY", "VISIBLE_OCTAVES", "PEDAL_ON_VALUE", "LOOKAHEAD_NOTES", "SWITCH_MARGIN",
+    "VISIBLE_OCTAVES", "PEDAL_ON_VALUE", "LOOKAHEAD_NOTES", "SWITCH_MARGIN",
     "MIN_NOTES_BETWEEN_SWITCHES", "BAR_TRANSPOSE_THRESHOLD", "MAX_MELODIC_JUMP_AFTER_FOLD", "SHIFT_HOLD_MAX_CHORD_RANK",
-    "MELODY_KEEP_TOP", "OCTAVE_PREVIEW_NEIGHBORS",
+    "MELODY_KEEP_TOP", "OCTAVE_PREVIEW_NEIGHBORS", "PLAYBACK_SPEED",
 }
 FLOAT_FIELDS = {
-    "BASE_TAP_HOLD", "SAME_TIME_WINDOW", "DENSITY_LIMIT_HZ", "COARSE_GROUP_WINDOW", "START_DELAY", "MIN_NOTE_LEN",
+    "SAME_TIME_WINDOW", "DENSITY_LIMIT_HZ", "START_DELAY", "MIN_NOTE_LEN",
     "RETRIGGER_GAP", "HIGH_FREQ_RELEASE_ADVANCE", "PEDAL_TAP_TIME", "FORCE_PEDAL_REPRESS_GAP", "SHIFT_WEIGHT", "CHORD_SPLIT_THRESHOLD", "OCTAVE_FOLD_WEIGHT",
     "SHIFT_HOLD_RELEASE_DELAY", "MELODY_PITCH_WEIGHT", "MELODY_DURATION_WEIGHT", "MELODY_CONTINUITY_WEIGHT",
 }
@@ -270,6 +268,14 @@ def save_config(path: str, config: Dict[str, Any]) -> None:
     out: List[str] = []
     for key in SAVE_ORDER:
         if key in config:
-            out.append(f"{key}={serialize_value(key, config[key])}")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(out).rstrip() + "\n")
+            try:
+                out.append(f"{key}={serialize_value(key, config[key])}")
+            except Exception as exc:
+                # 跳过无法序列化的值，记录警告
+                import logging
+                logging.warning(f"配置项序列化失败 {key}: {exc}")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(out).rstrip() + "\n")
+    except OSError as exc:
+        raise ValueError(f"无法保存配置到 {path}: {exc}") from exc

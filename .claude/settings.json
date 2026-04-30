@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git commit -m 'feat: Add type_definitions.py - Type safety and annotations *)"
+    ]
+  }
+}

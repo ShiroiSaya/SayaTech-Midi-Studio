@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from enum import Enum
 from typing import Optional
@@ -23,6 +24,7 @@ class TransportController(QObject):
     state_changed = Signal(str)
     analysis_changed = Signal(object)
     log = Signal(str)
+    speed_changed = Signal(float)
 
     def __init__(self, backend: Optional[PlaybackBackend] = None, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -34,6 +36,7 @@ class TransportController(QObject):
         self.duration_sec = 0.0
         self._play_started_at: Optional[float] = None
         self._position_anchor = 0.0
+        self._playback_lock = threading.Lock()  # 保护时间相关状态
         self.timer = QTimer(self)
         self.timer.setInterval(33)
         self.timer.timeout.connect(self._tick)
@@ -41,6 +44,7 @@ class TransportController(QObject):
         self._play_debounce_sec = 0.25
         self._low_latency_active = False
         self._prepared_analysis_id: Optional[int] = None
+        self._playback_speed = 1.0
 
     def _bind_analysis_lightweight(self, analysis: Optional[MidiAnalysisResult]) -> None:
         if hasattr(self.backend, 'analysis'):
@@ -123,9 +127,10 @@ class TransportController(QObject):
         self._last_play_request_at = now
         try:
             self._ensure_low_latency_mode()
-            self.backend.start(self.handle, self.position_sec)
-            self._position_anchor = self.position_sec
-            self._play_started_at = time.perf_counter()
+            self.backend.start(self.handle, self.position_sec, speed=self._playback_speed)
+            with self._playback_lock:
+                self._position_anchor = self.position_sec
+                self._play_started_at = time.perf_counter()
             self.state = TransportState.PLAYING
             self.timer.start()
             self.state_changed.emit(self.state.value)
@@ -205,8 +210,9 @@ class TransportController(QObject):
             append_runtime_log(f"Transport seek failed; staying alive. log={path}")
             return
         if self.state == TransportState.PLAYING:
-            self._position_anchor = self.position_sec
-            self._play_started_at = time.perf_counter()
+            with self._playback_lock:
+                self._position_anchor = self.position_sec
+                self._play_started_at = time.perf_counter()
             self._last_play_request_at = time.monotonic()
         else:
             if hasattr(self.backend, "invalidate_handle_snapshot"):
@@ -234,11 +240,39 @@ class TransportController(QObject):
         else:
             self.play()
 
+    def set_playback_speed(self, speed: float) -> None:
+        """设置播放速度 (0.1 - 3.0)，实时生效"""
+        old_speed = self._playback_speed
+        new_speed = max(0.1, min(3.0, float(speed)))
+        
+        with self._playback_lock:
+            if self.state == TransportState.PLAYING and self._play_started_at is not None:
+                # 重新计算锚点，保持当前视觉位置不变
+                elapsed_real = time.perf_counter() - self._play_started_at
+                elapsed_scaled = elapsed_real * old_speed
+                # 新的锚点 = 当前位置 - 已流逝的缩放时间 / 新速度
+                self._position_anchor = self.position_sec - (elapsed_scaled / new_speed)
+                self._play_started_at = time.perf_counter()
+        
+        self._playback_speed = new_speed
+        self.speed_changed.emit(new_speed)
+        
+        # 同步更新后端速度
+        if hasattr(self.backend, 'set_playback_speed'):
+            self.backend.set_playback_speed(new_speed)
+
+    def get_playback_speed(self) -> float:
+        """获取当前播放速度"""
+        return self._playback_speed
+
     def _update_position_from_clock(self) -> None:
-        if self.state != TransportState.PLAYING or self._play_started_at is None:
+        if self.state != TransportState.PLAYING:
             return
-        elapsed = time.perf_counter() - self._play_started_at
-        self.position_sec = min(self.duration_sec, self._position_anchor + elapsed)
+        with self._playback_lock:
+            if self._play_started_at is None:
+                return
+            elapsed = (time.perf_counter() - self._play_started_at) * self._playback_speed
+            self.position_sec = min(self.duration_sec, self._position_anchor + elapsed)
 
     def _tick(self) -> None:
         if self.state != TransportState.PLAYING:

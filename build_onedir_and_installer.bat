@@ -19,7 +19,7 @@ if defined BUILD_CHOICE goto ROUTE
 
 :MENU
 echo ==============================================
-echo   SayaTech MIDI Studio 1.0.5 - Onedir Installer Build
+echo   SayaTech MIDI Studio 1.0.7 - Onedir Installer Build
 echo ==============================================
 echo [1] CPU精简版（安装包更小，GPU加速不可用）
 echo [2] GPU完整版（需已安装CUDA版 torch）
@@ -70,11 +70,13 @@ if not "%GPU_CHECK_RC%"=="0" goto FAIL
 exit /b 0
 
 :RUN_INNO_CPU
+if not exist installer_output mkdir installer_output
 "%ISCC%" "installer_cpu.iss"
 if errorlevel 1 goto FAIL
 exit /b 0
 
 :RUN_INNO_GPU
+if not exist installer_output mkdir installer_output
 "%ISCC%" "installer_gpu.iss"
 if errorlevel 1 goto FAIL
 exit /b 0
@@ -88,7 +90,7 @@ echo [CPU] 开始构建 CPU精简版...
 call :RUN_INNO_CPU || goto FAIL
 echo.
 echo CPU精简版完成：dist\SayaTech_MIDI_Studio_CPU
-echo 安装包：installer_output\SayaTech_MIDI_Studio_CPU_Setup_v1.0.5.exe
+echo 安装包：installer_output\SayaTech_MIDI_Studio_CPU_Setup_v1.0.7.exe
 pause
 exit /b 0
 
@@ -102,7 +104,7 @@ echo [GPU] 开始构建 GPU完整版...
 call :RUN_INNO_GPU || goto FAIL
 echo.
 echo GPU完整版完成：dist\SayaTech_MIDI_Studio_GPU
-echo 安装包：installer_output\SayaTech_MIDI_Studio_GPU_Setup_v1.0.5.exe
+echo 安装包：installer_output\SayaTech_MIDI_Studio_GPU_Setup_v1.0.7.exe
 pause
 exit /b 0
 
@@ -120,8 +122,8 @@ echo [GPU] 开始构建 GPU完整版...
 call :RUN_INNO_GPU || goto FAIL
 echo.
 echo 两个版本都已完成。
-echo CPU安装包：installer_output\SayaTech_MIDI_Studio_CPU_Setup_v1.0.5.exe
-echo GPU安装包：installer_output\SayaTech_MIDI_Studio_GPU_Setup_v1.0.5.exe
+echo CPU安装包：installer_output\SayaTech_MIDI_Studio_CPU_Setup_v1.0.7.exe
+echo GPU安装包：installer_output\SayaTech_MIDI_Studio_GPU_Setup_v1.0.7.exe
 pause
 exit /b 0
 

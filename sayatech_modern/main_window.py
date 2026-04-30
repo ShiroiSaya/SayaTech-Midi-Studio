@@ -41,7 +41,6 @@ from PySide6.QtWidgets import (
 )
 
 from .backend import ModernDrumBackend, ModernPianoBackend
-from .cache_store import cache_size_bytes, clear_cache as clear_disk_cache, format_size as format_cache_size
 from .app_paths import ensure_user_config_file, user_data_root
 from .gpu_accel import resolve_compute_backend
 from .crash_logging import append_runtime_log, runtime_log_path, set_runtime_debug_mode
@@ -59,6 +58,16 @@ from .widgets import AnimatedButton, AnimatedSwitch, FadeDialog, FadeStackedWidg
 
 QPushButton = AnimatedButton
 QCheckBox = AnimatedSwitch
+
+
+def _pass_wheel_event_to_parent(widget, event):
+    """将滚轮事件传递给父级控件，实现滚动穿透"""
+    parent = widget.parent()
+    while parent is not None:
+        if hasattr(parent, 'wheelEvent'):
+            parent.wheelEvent(event)
+            return
+        parent = parent.parent()
 
 
 def _ui_dark_mode() -> bool:
@@ -1099,7 +1108,13 @@ class DrumRollWidget(QWidget):
 
 
 class SettingsDialog(FadeDialog):
-    def __init__(self, settings: UISettings, parent: Optional[QWidget] = None, *, cache_size_provider: Optional[Callable[[], int]] = None, clear_cache_callback: Optional[Callable[[], int]] = None):
+    """设置对话框 - 改动立即生效，无需保存按钮"""
+    
+    # 定义设置变更信号
+    setting_changed = Signal(str, object)  # 设置名, 新值
+    runtime_config_changed = Signal(str, object)  # 配置项名, 新值
+    
+    def __init__(self, settings: UISettings, runtime_config: Optional[Dict[str, Any]] = None, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("外观、快捷键与性能")
         self.setModal(True)
@@ -1109,8 +1124,10 @@ class SettingsDialog(FadeDialog):
         self.setObjectName("Surface")
         self.setAttribute(Qt.WA_StyledBackground, False)
         self._settings = UISettings(**settings.__dict__)
-        self._cache_size_provider = cache_size_provider or cache_size_bytes
-        self._clear_cache_callback = clear_cache_callback
+        self._original_settings = UISettings(**settings.__dict__)
+        self._runtime_config = runtime_config or {}
+        self._pedal_hold_mode_changed = False
+        self._main_window = parent  # 保存主窗口引用以便实时应用设置
         self.background_surface = BackgroundSurface(BACKGROUND_IMAGE_PATH, self)
         self.background_surface.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.background_surface.setGeometry(self.rect())
@@ -1184,17 +1201,20 @@ class SettingsDialog(FadeDialog):
         for label, value in [("海洋蓝", "ocean"), ("紫晶", "violet"), ("翡翠", "emerald"), ("落日橙", "sunset"), ("石墨灰", "graphite")]:
             self.theme_combo.addItem(label, value)
         self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(getattr(self._settings, "theme_preset", "ocean"))))
+        self.theme_combo.wheelEvent = lambda event: _pass_wheel_event_to_parent(self.theme_combo, event)  # 滚轮穿透到父级
         appearance_layout.addWidget(self.theme_combo, 2, 1)
         appearance_layout.addWidget(QLabel("窗口缩放"), 3, 0)
         self.scale_combo = QComboBox()
         for value in [80, 90, 100, 110, 125, 130]:
             self.scale_combo.addItem(f"{value}%", value)
         self.scale_combo.setCurrentIndex(max(0, self.scale_combo.findData(self._settings.ui_scale)))
+        self.scale_combo.wheelEvent = lambda event: _pass_wheel_event_to_parent(self.scale_combo, event)  # 滚轮穿透到父级
         appearance_layout.addWidget(self.scale_combo, 3, 1)
         appearance_layout.addWidget(QLabel("毛玻璃厚度"), 4, 0)
         self.glass_blur_slider = QSlider(Qt.Horizontal)
         self.glass_blur_slider.setRange(0, 100)
         self.glass_blur_slider.setValue(int(getattr(self._settings, "glass_blur", 58)))
+        self.glass_blur_slider.wheelEvent = lambda event: _pass_wheel_event_to_parent(self.glass_blur_slider, event)  # 滚轮穿透到父级
         appearance_layout.addWidget(self.glass_blur_slider, 4, 1)
         self.glass_blur_label = QLabel(f"{int(getattr(self._settings, 'glass_blur', 58))}%（夜间模式自动关闭背景）")
         self.glass_blur_label.setProperty("muted", True)
@@ -1207,6 +1227,7 @@ class SettingsDialog(FadeDialog):
         for value in [1000, 2000, 3000, 4000, 5000]:
             self.splash_duration_combo.addItem(f"{value // 1000} 秒", value)
         self.splash_duration_combo.setCurrentIndex(max(0, self.splash_duration_combo.findData(int(getattr(self._settings, "splash_duration_ms", 3000)))))
+        self.splash_duration_combo.wheelEvent = lambda event: _pass_wheel_event_to_parent(self.splash_duration_combo, event)  # 滚轮穿透到父级
         appearance_layout.addWidget(self.splash_duration_combo, 7, 1)
         self.anim_switch = AnimatedSwitch("启用动画")
         self.anim_switch.setChecked(self._settings.animations_enabled)
@@ -1215,6 +1236,7 @@ class SettingsDialog(FadeDialog):
         self.anim_speed_slider = QSlider(Qt.Horizontal)
         self.anim_speed_slider.setRange(40, 220)
         self.anim_speed_slider.setValue(int(self._settings.animation_speed))
+        self.anim_speed_slider.wheelEvent = lambda event: _pass_wheel_event_to_parent(self.anim_speed_slider, event)  # 滚轮穿透到父级
         appearance_layout.addWidget(self.anim_speed_slider, 9, 1)
         self.anim_speed_label = QLabel(f"{self._settings.animation_speed}%")
         self.anim_speed_label.setProperty("muted", True)
@@ -1236,36 +1258,26 @@ class SettingsDialog(FadeDialog):
         perf_hint.setWordWrap(True)
         perf_hint.setProperty("muted", True)
         appearance_layout.addWidget(perf_hint, 15, 0, 1, 2)
-        self.anim_speed_slider.valueChanged.connect(lambda value: self.anim_speed_label.setText(f"{value}%"))
-        self.glass_blur_slider.valueChanged.connect(lambda value: self.glass_blur_label.setText(f"{value}%（夜间模式自动关闭背景）"))
+        # 踏板按住模式设置
+        appearance_layout.addWidget(QLabel("踏板模式"), 16, 0)
+        self.pedal_mode_combo = QComboBox()
+        self.pedal_mode_combo.addItem("点按切换", False)
+        self.pedal_mode_combo.addItem("按住模式", True)
+        current_pedal_hold = bool(self._runtime_config.get("PEDAL_HOLD_MODE", False))
+        self.pedal_mode_combo.setCurrentIndex(1 if current_pedal_hold else 0)
+        self.pedal_mode_combo.activated.connect(self._on_pedal_mode_activated)  # 使用activated信号修复单击问题
+        self.pedal_mode_combo.wheelEvent = lambda event: _pass_wheel_event_to_parent(self.pedal_mode_combo, event)  # 滚轮穿透到父级
+        appearance_layout.addWidget(self.pedal_mode_combo, 16, 1)
+        pedal_hint = QLabel("点按切换：按一次空格开踏板，再按一次关踏板；按住模式：按住空格开踏板，松开即关。")
+        pedal_hint.setWordWrap(True)
+        pedal_hint.setProperty("muted", True)
+        appearance_layout.addWidget(pedal_hint, 17, 0, 1, 2)
         self.anim_speed_slider.setEnabled(self._settings.animations_enabled)
         self.anim_switch.toggled.connect(self.anim_speed_slider.setEnabled)
+        
+        # 连接实时生效的信号（包括标签更新）
+        self._connect_realtime_signals()
         content_layout.addWidget(appearance_card)
-
-        cache_card = Card()
-        cache_layout = QGridLayout(cache_card)
-        cache_layout.setContentsMargins(16, 14, 16, 14)
-        cache_layout.setHorizontalSpacing(12)
-        cache_layout.setVerticalSpacing(8)
-        cache_title = QLabel("本地缓存")
-        cache_title.setProperty("sectionTitle", True)
-        cache_layout.addWidget(cache_title, 0, 0, 1, 2)
-        cache_desc = QLabel("缓存会保存分析和自动调参结果。清除后，下次载入会重新计算。")
-        cache_desc.setProperty("muted", True)
-        cache_desc.setWordWrap(True)
-        cache_layout.addWidget(cache_desc, 1, 0, 1, 2)
-        cache_layout.addWidget(QLabel("当前缓存大小"), 2, 0)
-        self.cache_size_label = QLabel("读取中…")
-        self.cache_size_label.setProperty("muted", True)
-        cache_layout.addWidget(self.cache_size_label, 2, 1)
-        self.refresh_cache_btn = QPushButton("刷新缓存大小")
-        self.refresh_cache_btn.clicked.connect(self._refresh_cache_info)
-        self.clear_cache_btn = QPushButton("清除本地缓存")
-        self.clear_cache_btn.clicked.connect(self._clear_cache)
-        cache_layout.addWidget(self.refresh_cache_btn, 3, 0)
-        cache_layout.addWidget(self.clear_cache_btn, 3, 1)
-        content_layout.addWidget(cache_card)
-        self._refresh_cache_info()
 
         watermark = QLabel("@SayaTech")
         watermark.setProperty("watermark", True)
@@ -1273,34 +1285,17 @@ class SettingsDialog(FadeDialog):
         content_layout.addWidget(watermark)
         content_layout.addStretch(1)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
-        buttons.accepted.connect(self._accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        # 移除保存/取消按钮，改为立即生效模式
+        # 添加关闭按钮
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self._accept)
+        root.addWidget(close_btn)
 
     def _refresh_cache_info(self) -> None:
-        try:
-            self.cache_size_label.setText(format_cache_size(int(self._cache_size_provider() or 0)))
-        except Exception as exc:
-            self.cache_size_label.setText(f"读取失败：{exc}")
+        pass
 
     def _clear_cache(self) -> None:
-        if QMessageBox.question(self, "清除缓存", "确定要清除本地缓存吗？这不会删除 MIDI 文件，但下次分析/调参/预热会重新构建。") != QMessageBox.StandardButton.Yes:
-            return
-        removed_bytes = 0
-        try:
-            removed_bytes = int(self._cache_size_provider() or 0)
-        except Exception:
-            removed_bytes = 0
-        if self._clear_cache_callback is not None:
-            try:
-                self._clear_cache_callback()
-            except Exception as exc:
-                QMessageBox.warning(self, "清除缓存失败", str(exc))
-                self._refresh_cache_info()
-                return
-        self._refresh_cache_info()
-        QMessageBox.information(self, "清除完成", f"已清除本地缓存：{format_cache_size(removed_bytes)}")
+        pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1333,7 +1328,102 @@ class SettingsDialog(FadeDialog):
     def settings(self) -> UISettings:
         return self._settings
 
+    @property
+    def runtime_config_updates(self) -> Dict[str, Any]:
+        """返回需要更新的 runtime_config 项"""
+        if self._pedal_hold_mode_changed:
+            return {"PEDAL_HOLD_MODE": bool(self.pedal_mode_combo.currentData())}
+        return {}
+
+    def _connect_realtime_signals(self) -> None:
+        """连接所有实时生效的设置变更信号"""
+        # 热键设置
+        for name, sw in self.hotkey_switches.items():
+            sw.toggled.connect(lambda checked, n=name: self._on_hotkey_enabled_changed(n, checked))
+        for name, edit in self.hotkey_edits.items():
+            edit.editingFinished.connect(lambda n=name, e=edit: self._on_hotkey_changed(n, e))
+        
+        # 外观设置 - 滑块同时更新标签和应用设置
+        self.glass_blur_slider.valueChanged.connect(self._on_glass_blur_changed)
+        self.anim_speed_slider.valueChanged.connect(self._on_anim_speed_changed)
+        
+        # 其他外观设置
+        self.dark_mode_switch.toggled.connect(lambda checked: self._apply_setting("dark_mode", checked))
+        self.theme_combo.activated.connect(lambda: self._apply_setting("theme_preset", str(self.theme_combo.currentData() or "ocean")))
+        self.scale_combo.activated.connect(lambda: self._apply_setting("ui_scale", int(self.scale_combo.currentData())))
+        self.splash_switch.toggled.connect(lambda checked: self._apply_setting("splash_enabled", checked))
+        self.splash_duration_combo.activated.connect(lambda: self._apply_setting("splash_duration_ms", int(self.splash_duration_combo.currentData() or 3000)))
+        self.anim_switch.toggled.connect(lambda checked: self._apply_setting("animations_enabled", checked))
+        self.debug_switch.toggled.connect(lambda checked: self._apply_setting("debug_mode", checked))
+        self.gpu_switch.toggled.connect(lambda checked: self._apply_setting("gpu_acceleration", checked))
+        self.performance_switch.toggled.connect(lambda checked: self._apply_setting("performance_mode", checked))
+    
+    def _on_glass_blur_changed(self, value: int) -> None:
+        """毛玻璃厚度变化 - 更新标签并应用设置"""
+        self.glass_blur_label.setText(f"{value}%（夜间模式自动关闭背景）")
+        self._apply_setting("glass_blur", value)
+    
+    def _on_anim_speed_changed(self, value: int) -> None:
+        """动画速度变化 - 更新标签并应用设置"""
+        self.anim_speed_label.setText(f"{value}%")
+        self._apply_setting("animation_speed", value)
+    
+    def _apply_setting(self, name: str, value: object) -> None:
+        """立即应用单个设置变更"""
+        setattr(self._settings, name, value)
+        self.setting_changed.emit(name, value)
+        # 立即应用到主窗口
+        if self._main_window and hasattr(self._main_window, '_apply_ui_settings'):
+            self._main_window.ui_settings = self._settings
+            self._main_window._apply_ui_settings()
+            # 保存设置
+            from .ui_settings import save_ui_settings
+            save_ui_settings(None, self._settings)
+    
+    def _on_hotkey_enabled_changed(self, name: str, enabled: bool) -> None:
+        """热键启用状态变更"""
+        setattr(self._settings, f"{name}_hotkey_enabled", enabled)
+        self._apply_hotkey_settings()
+    
+    def _on_hotkey_changed(self, name: str, edit: QKeySequenceEdit) -> None:
+        """热键序列变更"""
+        seq = edit.keySequence().toString(QKeySequence.PortableText).strip()
+        setattr(self._settings, f"{name}_hotkey", seq.upper() or 'F10')
+        self._apply_hotkey_settings()
+    
+    def _apply_hotkey_settings(self) -> None:
+        """应用热键设置到主窗口"""
+        if self._main_window:
+            self._main_window.ui_settings = self._settings
+            from .ui_settings import save_ui_settings
+            save_ui_settings(None, self._settings)
+            if hasattr(self._main_window, '_rebuild_shortcuts'):
+                self._main_window._rebuild_shortcuts()
+            if hasattr(self._main_window, '_refresh_hotkey_labels'):
+                self._main_window._refresh_hotkey_labels()
+            if hasattr(self._main_window, '_refresh_global_hotkey_bindings'):
+                self._main_window._refresh_global_hotkey_bindings()
+    
+    def _on_pedal_mode_activated(self, index: int) -> None:
+        """踏板模式切换 - 使用activated信号确保单击生效"""
+        self._pedal_hold_mode_changed = True
+        new_value = bool(self.pedal_mode_combo.currentData())
+        self.runtime_config_changed.emit("PEDAL_HOLD_MODE", new_value)
+        # 立即应用到主窗口
+        if self._main_window:
+            self._main_window.runtime_config["PEDAL_HOLD_MODE"] = new_value
+            self._main_window._mark_runtime_config_dirty()
+            # 更新所有后端的踏板模式（通过update_config确保缓存被清空）
+            if hasattr(self._main_window, 'piano_backend'):
+                self._main_window.piano_backend.update_config(self._main_window.runtime_config)
+            if hasattr(self._main_window, 'drum_backend'):
+                self._main_window.drum_backend.update_config(self._main_window.runtime_config)
+            if hasattr(self._main_window, '_log'):
+                self._main_window._log(f"踏板模式已切换为：{'按住模式' if new_value else '点按切换'}")
+
     def _accept(self) -> None:
+        """关闭对话框 - 所有设置已实时生效"""
+        # 检查热键冲突
         keys = {}
         for name, edit in self.hotkey_edits.items():
             seq = edit.keySequence().toString(QKeySequence.PortableText).strip()
@@ -1343,23 +1433,7 @@ class SettingsDialog(FadeDialog):
         if len(active_values) != len(set(active_values)):
             QMessageBox.warning(self, "热键冲突", "播放、暂停和停止的热键不能重复。")
             return
-        self._settings.play_hotkey_enabled = self.hotkey_switches['play'].isChecked()
-        self._settings.pause_hotkey_enabled = self.hotkey_switches['pause'].isChecked()
-        self._settings.stop_hotkey_enabled = self.hotkey_switches['stop'].isChecked()
-        self._settings.play_hotkey = keys['play'] or 'F10'
-        self._settings.pause_hotkey = keys['pause'] or 'F11'
-        self._settings.stop_hotkey = keys['stop'] or 'F12'
-        self._settings.dark_mode = self.dark_mode_switch.isChecked()
-        self._settings.theme_preset = str(self.theme_combo.currentData() or "ocean")
-        self._settings.ui_scale = int(self.scale_combo.currentData())
-        self._settings.animations_enabled = self.anim_switch.isChecked()
-        self._settings.animation_speed = int(self.anim_speed_slider.value())
-        self._settings.debug_mode = self.debug_switch.isChecked()
-        self._settings.glass_blur = int(self.glass_blur_slider.value())
-        self._settings.splash_enabled = self.splash_switch.isChecked()
-        self._settings.splash_duration_ms = int(self.splash_duration_combo.currentData() or 3000)
-        self._settings.gpu_acceleration = self.gpu_switch.isChecked()
-        self._settings.performance_mode = self.performance_switch.isChecked()
+        # 所有设置已经实时应用，只需关闭对话框
         self.accept()
 
 
@@ -1371,6 +1445,7 @@ class MainWindow(QMainWindow):
     midi_load_failed = Signal(object)
     backend_log_signal = Signal(str)
     drum_report_ready = Signal(object)
+    analysis_filter_ready = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -1409,6 +1484,7 @@ class MainWindow(QMainWindow):
         self._midi_load_token = 0
         self._track_refresh_pending = False
         self._analysis_refresh_inflight: Dict[str, Optional[object]] = {'piano': None, 'drum': None}
+        self._track_selection_version = 0
         self._runtime_config_dirty = True
         self._last_position_slider_value = -1
         self._last_position_time_key = (None, None, None)
@@ -1446,6 +1522,7 @@ class MainWindow(QMainWindow):
         self._load_config_into_form()
         self._load_drum_config_widgets()
         self._apply_pure_mode_ui()
+        self._load_speed_setting()
         self._wire_transport()
         self._setup_shortcuts()
         self._setup_global_hotkeys()
@@ -1453,6 +1530,7 @@ class MainWindow(QMainWindow):
         self._sync_mode_cards()
         self.clock_sync_finished.connect(self._apply_clock_sync)
         self.drum_report_ready.connect(self._on_drum_report_ready)
+        self.analysis_filter_ready.connect(self._on_analysis_filter_ready, Qt.QueuedConnection)
         self.tuner_finished.connect(self._on_tuner_finished)
         self.tuner_failed.connect(self._on_tuner_failed)
         self.midi_loaded.connect(self._on_midi_loaded)
@@ -1511,8 +1589,8 @@ class MainWindow(QMainWindow):
         header_layout.addLayout(title_box)
         header_layout.addStretch(1)
         self.settings_btn = QToolButton()
-        self.settings_btn.setText("⚙")
-        self.settings_btn.setToolTip("设置")
+        self.settings_btn.setText(" 设置 ⚙")
+        self.settings_btn.setToolTip("打开设置")
         self.settings_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self.settings_btn.clicked.connect(self._open_settings)
         header_layout.addWidget(self.settings_btn)
@@ -1725,6 +1803,7 @@ class MainWindow(QMainWindow):
         self.progress_slider.setRange(0, 1000)
         self.progress_slider.sliderMoved.connect(self._on_slider_moved)
         self.progress_slider.sliderReleased.connect(self._on_slider_released)
+        self.progress_slider.wheelEvent = lambda event: _pass_wheel_event_to_parent(self.progress_slider, event)  # 滚轮穿透到父级
         timeline_layout.addWidget(self.progress_slider)
         buttons = QHBoxLayout()
         self.play_btn = QPushButton("F10 播放 / 继续")
@@ -1736,6 +1815,31 @@ class MainWindow(QMainWindow):
         self.stop_btn.clicked.connect(self.transport.stop)
         for btn in [self.play_btn, self.pause_btn, self.stop_btn]:
             buttons.addWidget(btn)
+        
+        # 播放速度控制
+        buttons.addSpacing(20)
+        speed_label = QLabel("速度:")
+        speed_label.setProperty("muted", True)
+        buttons.addWidget(speed_label)
+        self.speed_slider = QSlider(Qt.Horizontal)
+        self.speed_slider.setRange(10, 300)
+        self.speed_slider.setValue(100)
+        self.speed_slider.setFixedWidth(120)
+        self.speed_slider.setToolTip("演奏速度 (0.1x - 3.0x)")
+        self.speed_slider.valueChanged.connect(self._on_speed_changed)
+        self.speed_slider.wheelEvent = lambda event: _pass_wheel_event_to_parent(self.speed_slider, event)  # 滚轮穿透到父级
+        buttons.addWidget(self.speed_slider)
+        self.speed_spinbox = QDoubleSpinBox()
+        self.speed_spinbox.setRange(0.1, 3.0)
+        self.speed_spinbox.setValue(1.0)
+        self.speed_spinbox.setSingleStep(0.1)
+        self.speed_spinbox.setDecimals(2)
+        self.speed_spinbox.setFixedWidth(85)
+        self.speed_spinbox.setToolTip("演奏速度倍数")
+        self.speed_spinbox.valueChanged.connect(self._on_speed_spinbox_changed)
+        self.speed_spinbox.wheelEvent = lambda event: _pass_wheel_event_to_parent(self.speed_spinbox, event)  # 滚轮穿透到父级
+        buttons.addWidget(self.speed_spinbox)
+        
         buttons.addStretch(1)
         timeline_layout.addLayout(buttons)
         vertical_split.addWidget(timeline_card)
@@ -1812,7 +1916,7 @@ class MainWindow(QMainWindow):
         self.drum_preview_stack.addWidget(self.drum_roll)
         self.drum_preview_stack.addWidget(self._drum_detail_placeholder)
         drum_layout.addWidget(self.drum_preview_stack, 1)
-        left_layout.addWidget(drum_card, 2)
+        left_layout.addWidget(drum_card, 0)
 
         drum_timeline_card = Card()
         drum_timeline_layout = QVBoxLayout(drum_timeline_card)
@@ -1834,6 +1938,7 @@ class MainWindow(QMainWindow):
         self.drum_progress_slider.setRange(0, 1000)
         self.drum_progress_slider.sliderMoved.connect(self._on_drum_slider_moved)
         self.drum_progress_slider.sliderReleased.connect(self._on_drum_slider_released)
+        self.drum_progress_slider.wheelEvent = lambda event: _pass_wheel_event_to_parent(self.drum_progress_slider, event)  # 滚轮穿透到父级
         drum_timeline_layout.addWidget(self.drum_progress_slider)
         buttons = QHBoxLayout()
         self.drum_play_btn = QPushButton("F10 播放 / 继续")
@@ -1847,7 +1952,7 @@ class MainWindow(QMainWindow):
             buttons.addWidget(btn)
         buttons.addStretch(1)
         drum_timeline_layout.addLayout(buttons)
-        left_layout.addWidget(drum_timeline_card, 1)
+        left_layout.addWidget(drum_timeline_card, 0)
 
         content_split.addWidget(left_panel)
 
@@ -1880,19 +1985,30 @@ class MainWindow(QMainWindow):
         desc.setProperty("sectionDesc", True)
         desc.setWordWrap(True)
         param_layout.addWidget(desc, 1, 0, 1, 2)
+        
+        # 鼓模式速度控制（与下方参数对齐）
+        drum_speed_label = QLabel("演奏速度")
+        drum_speed_label.setToolTip("演奏速度倍数，1.0为原速")
+        param_layout.addWidget(drum_speed_label, 2, 0)
+        self.drum_param_speed_spinbox = QDoubleSpinBox()
+        self.drum_param_speed_spinbox.setRange(0.1, 3.0)
+        self.drum_param_speed_spinbox.setValue(1.0)
+        self.drum_param_speed_spinbox.setSingleStep(0.1)
+        self.drum_param_speed_spinbox.setDecimals(2)
+        self.drum_param_speed_spinbox.setFixedWidth(112)
+        self.drum_param_speed_spinbox.valueChanged.connect(self._on_drum_param_speed_spinbox_changed)
+        self.drum_param_speed_spinbox.wheelEvent = lambda event: _pass_wheel_event_to_parent(self.drum_param_speed_spinbox, event)  # 滚轮穿透到父级
+        param_layout.addWidget(self.drum_param_speed_spinbox, 2, 1)
+        
         self._drum_param_specs = [
-            ("BASE_TAP_HOLD", "基础点按时长", "float", "每个鼓键最短按住多久。太短会发虚，太长会糊成一片。"),
             ("SAME_TIME_WINDOW", "同时击打判定窗口", "float", "起音非常接近的鼓击会被视为同一拍内同时出现。"),
-            ("COARSE_GROUP_WINDOW", "上下文分组窗口", "float", "给上下文替代和智能保留做粗分组时使用的时间窗口。"),
             ("DENSITY_LIMIT_HZ", "同键频率上限", "float", "同一个键每秒最多允许触发多少次，避免超高速连打。"),
-            ("ACCENT_VELOCITY", "重音阈值", "int", "力度高于这个值的鼓击会更偏向保留成重音。"),
-            ("GHOST_VELOCITY", "弱音阈值", "int", "力度低于这个值的鼓击会更偏向弱音处理。"),
+            ("MAX_SIMULTANEOUS", "最大同时击打数", "int", "同一拍最多保留多少个鼓击，超出时会优先保留节奏骨架。"),
             ("USE_CONTEXT_REPLACE", "启用上下文替代", "bool", "缺少对应鼓键时，结合上下文选择更自然的替代乐器。"),
-            ("USE_VELOCITY_RULES", "启用力度规则", "bool", "根据力度区分重音、弱音和普通击打。"),
             ("USE_SMART_KEEP", "启用智能保留", "bool", "同一拍鼓击太多时，优先保留更重要的乐器和节奏骨架。"),
             ("PREFER_CHANNEL_10", "优先读取鼓轨", "bool", "分析时优先把第 10 通道当成标准鼓轨来处理。"),
         ]
-        row = 2
+        row = 4
         for key, label, kind, help_text in self._drum_param_specs:
             lab = QLabel(label)
             lab.setToolTip(help_text)
@@ -1974,8 +2090,13 @@ class MainWindow(QMainWindow):
         if kind == "int":
             widget = QSpinBox()
             widget.setRange(1, 127)
-            widget.setValue(int(value))
+            # MAX_SIMULTANEOUS 可能是 "none" 字符串，需要特殊处理
+            if isinstance(value, str) and value.strip().lower() in ("none", "", "null"):
+                widget.setValue(8)  # 默认值
+            else:
+                widget.setValue(int(value))
             widget.setMinimumWidth(96)
+            widget.wheelEvent = lambda event, w=widget: _pass_wheel_event_to_parent(w, event)  # 滚轮穿透到父级
             return widget
         widget = QDoubleSpinBox()
         widget.setDecimals(3)
@@ -1983,6 +2104,7 @@ class MainWindow(QMainWindow):
         widget.setRange(0.001, 999.0)
         widget.setValue(float(value))
         widget.setMinimumWidth(112)
+        widget.wheelEvent = lambda event, w=widget: _pass_wheel_event_to_parent(w, event)  # 滚轮穿透到父级
         return widget
 
     def _build_config_page(self) -> QWidget:
@@ -2126,12 +2248,14 @@ class MainWindow(QMainWindow):
         if spec.kind == "int":
             widget = QSpinBox()
             widget.setRange(-999999, 999999)
+            widget.wheelEvent = lambda event, w=widget: _pass_wheel_event_to_parent(w, event)  # 滚轮穿透到父级
             return widget
         if spec.kind == "float":
             widget = QDoubleSpinBox()
             widget.setDecimals(4)
             widget.setSingleStep(0.01)
             widget.setRange(-999999.0, 999999.0)
+            widget.wheelEvent = lambda event, w=widget: _pass_wheel_event_to_parent(w, event)  # 滚轮穿透到父级
             return widget
         widget = QLineEdit()
         return widget
@@ -2544,7 +2668,7 @@ class MainWindow(QMainWindow):
         duration_sec = float(getattr(self.transport, 'duration_sec', 0.0) or 0.0)
         performance_mode = self._performance_mode_enabled()
         if self.current_mode == 'piano' and hasattr(self, 'waveform'):
-            analysis = self.transport.analysis if current_backend_kind == 'piano' else self._analysis_for_backend_kind('piano')
+            analysis = self.transport.analysis if current_backend_kind == 'piano' else self._analysis_for_backend_kind('piano', allow_build=False)
             if not performance_mode:
                 self.piano_roll.set_analysis(analysis)
                 if getattr(self, '_piano_preview_mode', 'lite') == 'detail' and self.piano_roll_detail is not None:
@@ -2566,7 +2690,7 @@ class MainWindow(QMainWindow):
                 self.progress_slider.blockSignals(False)
                 self.time_label.setText(f"00:00 / {self._format_time(analysis.duration_sec if analysis else 0.0)}")
         elif self.current_mode == 'drum' and hasattr(self, 'drum_waveform'):
-            analysis = self.transport.analysis if current_backend_kind == 'drum' else self._analysis_for_backend_kind('drum')
+            analysis = self.transport.analysis if current_backend_kind == 'drum' else self._analysis_for_backend_kind('drum', allow_build=False)
             if not performance_mode:
                 self.drum_roll.set_analysis(analysis)
                 if getattr(self, '_drum_preview_mode', 'lite') == 'detail' and self.drum_roll_detail is not None:
@@ -2603,18 +2727,11 @@ class MainWindow(QMainWindow):
             self.drum_stop_btn.setText(f"{_pretty_hotkey(self.ui_settings.stop_hotkey)} 停止并回零")
 
     def _open_settings(self) -> None:
-        dialog = SettingsDialog(self.ui_settings, self, cache_size_provider=cache_size_bytes, clear_cache_callback=self._clear_local_cache)
+        dialog = SettingsDialog(self.ui_settings, self.runtime_config, self)
         dialog.setStyleSheet(self._last_applied_stylesheet)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self.ui_settings = dialog.settings
-        save_path = save_ui_settings(None, self.ui_settings)
-        self._apply_ui_settings()
-        self._rebuild_shortcuts()
-        self._refresh_hotkey_labels()
-        self._refresh_global_hotkey_bindings()
+        dialog.exec()  # 设置已实时生效，无需检查返回值
+        # 对话框关闭后，所有设置已经通过信号实时应用
         self._sync_visible_playback_widgets()
-        self._log(f"界面设置已保存")
 
     def _current_transport_backend_kind(self) -> str:
         return "drum" if self.transport.backend is self.drum_backend else "piano"
@@ -2629,7 +2746,7 @@ class MainWindow(QMainWindow):
         self.piano_preview_stack.fade_to_index(target_index)
         self._apply_page_update_policy()
         if self._piano_preview_mode == "detail" and self.piano_roll_detail is not None:
-            analysis = self.transport.analysis if self._current_transport_backend_kind() == "piano" else self._analysis_for_backend_kind("piano")
+            analysis = self.transport.analysis if self._current_transport_backend_kind() == "piano" else self._analysis_for_backend_kind("piano", allow_build=False)
             self.piano_roll_detail.set_analysis(analysis)
             self.piano_roll_detail.set_position(self.transport.position_sec if analysis is not None else 0.0)
         self._sync_visible_playback_widgets()
@@ -2644,7 +2761,7 @@ class MainWindow(QMainWindow):
         self.drum_preview_stack.fade_to_index(target_index)
         self._apply_page_update_policy()
         if self._drum_preview_mode == "detail" and self.drum_roll_detail is not None:
-            analysis = self.transport.analysis if self._current_transport_backend_kind() == "drum" else self._analysis_for_backend_kind("drum")
+            analysis = self.transport.analysis if self._current_transport_backend_kind() == "drum" else self._analysis_for_backend_kind("drum", allow_build=False)
             self.drum_roll_detail.set_analysis(analysis)
             self.drum_roll_detail.set_position(self.transport.position_sec if analysis is not None else 0.0)
         self._sync_visible_playback_widgets()
@@ -2789,30 +2906,48 @@ class MainWindow(QMainWindow):
         self._transport_refresh_key = None
         self._track_tree_render_key = None
         self._drum_report_render_key = None
+        self._analysis_refresh_inflight = {'piano': None, 'drum': None}
+        self._track_selection_version += 1
+
+    def _prefill_analysis_cache(self) -> None:
+        if self.current_analysis is None:
+            return
+        for backend_kind in ['piano', 'drum']:
+            selected = set(self._applied_track_selection_for_mode(backend_kind))
+            if not selected:
+                continue
+            cache_key = (backend_kind, tuple(sorted(selected)))
+            if cache_key not in self._analysis_cache:
+                self._schedule_analysis_filter(backend_kind, cache_key, selected)
 
     def _clear_local_cache(self) -> int:
-        removed_bytes = int(cache_size_bytes() or 0)
-        clear_disk_cache()
-        self._analysis_cache.clear()
-        self._analysis_cache_source_id = id(self.current_analysis) if self.current_analysis is not None else None
-        self._transport_refresh_key = None
-        self._drum_report_cache = None
-        self._drum_report_cache_key = None
-        self._drum_report_render_key = None
-        for backend in (getattr(self, 'piano_backend', None), getattr(self, 'drum_backend', None)):
-            if backend is not None and hasattr(backend, 'clear_runtime_caches'):
+        try:
+            removed_bytes = 0
+            self._analysis_cache.clear()
+            self._analysis_cache_source_id = id(self.current_analysis) if self.current_analysis is not None else None
+            self._transport_refresh_key = None
+            self._drum_report_cache = None
+            self._drum_report_cache_key = None
+            self._drum_report_render_key = None
+            self._analysis_refresh_inflight = {'piano': None, 'drum': None}
+            self._track_selection_version += 1
+            for backend in (getattr(self, 'piano_backend', None), getattr(self, 'drum_backend', None)):
+                if backend is not None and hasattr(backend, 'clear_runtime_caches'):
+                    try:
+                        backend.clear_runtime_caches()
+                    except Exception as exc:
+                        self._threadsafe_backend_log(f"[DEBUG] 清除后端缓存失败：{exc}")
+            if getattr(self, 'transport', None) is not None and getattr(self.transport, 'handle', None) is not None:
                 try:
-                    backend.clear_runtime_caches()
-                except Exception:
-                    pass
-        if getattr(self, 'transport', None) is not None and getattr(self.transport, 'handle', None) is not None:
-            try:
-                self.transport.backend.invalidate_handle_snapshot(self.transport.handle)
-            except Exception:
-                pass
-        self._refresh_playback_controls()
-        self._log(f"缓存已清除：{format_cache_size(removed_bytes)}")
-        return removed_bytes
+                    self.transport.backend.invalidate_handle_snapshot(self.transport.handle)
+                except Exception as exc:
+                    self._threadsafe_backend_log(f"[DEBUG] 清除传输句柄快照失败：{exc}")
+            self._refresh_playback_controls()
+            self._log(f"缓存已清除")
+            return removed_bytes
+        except Exception as exc:
+            self._threadsafe_backend_log(f"[DEBUG] 清除缓存失败：{exc}")
+            return 0
 
     def _analysis_for_backend_kind(self, backend_kind: str, allow_build: bool = True) -> Optional[MidiAnalysisResult]:
         if self.current_analysis is None:
@@ -2821,20 +2956,81 @@ class MainWindow(QMainWindow):
         if self._analysis_cache_source_id != source_id:
             self._analysis_cache.clear()
             self._analysis_cache_source_id = source_id
+            self._analysis_refresh_inflight = {'piano': None, 'drum': None}
         selected = set(self._applied_track_selection_for_mode(backend_kind))
+        if not selected:
+            return None
         cache_key = (backend_kind, tuple(sorted(selected)))
         cached = self._analysis_cache.get(cache_key)
         if cached is None:
             if not allow_build:
                 return None
-            cached = filter_analysis(
-                self.current_analysis,
-                selected,
-                use_gpu=bool(getattr(self.ui_settings, "gpu_acceleration", False)),
-                allow_empty=True,
-            )
-            self._analysis_cache[cache_key] = cached
+            if self._analysis_refresh_inflight.get(backend_kind) is None:
+                self._schedule_analysis_filter(backend_kind, cache_key, selected)
+            return None
         return cached
+
+
+    def _schedule_analysis_filter(self, backend_kind: str, cache_key: tuple, selected: set[int]) -> None:
+        current_analysis = self.current_analysis
+        analysis_id = id(current_analysis)
+        version = self._track_selection_version
+        token = (backend_kind, analysis_id, tuple(sorted(selected)), version)
+        self._analysis_refresh_inflight[backend_kind] = token
+        use_gpu = bool(getattr(self.ui_settings, "gpu_acceleration", False))
+        def worker() -> None:
+            try:
+                if current_analysis is None:
+                    return
+                # bail early if a newer request has superseded this one
+                if self._analysis_refresh_inflight.get(backend_kind) != token:
+                    return
+                filtered = filter_analysis(
+                    current_analysis,
+                    selected,
+                    use_gpu=use_gpu,
+                    allow_empty=True,
+                )
+                self.analysis_filter_ready.emit({
+                    'backend_kind': backend_kind,
+                    'cache_key': cache_key,
+                    'result': filtered,
+                    'token': token,
+                })
+            except Exception as exc:
+                self._threadsafe_backend_log(f"[DEBUG] 轨道过滤后台计算失败：{exc}")
+                self.analysis_filter_ready.emit({
+                    'backend_kind': backend_kind,
+                    'cache_key': cache_key,
+                    'result': None,
+                    'token': token,
+                    'error': str(exc),
+                })
+        threading.Thread(target=worker, daemon=True, name=f'AnalysisFilterWorker-{backend_kind}').start()
+
+    def _on_analysis_filter_ready(self, payload: object) -> None:
+        try:
+            data = dict(payload or {})
+            backend_kind = data.get('backend_kind')
+            cache_key = data.get('cache_key')
+            result = data.get('result')
+            token = data.get('token')
+            error = data.get('error')
+            if token != self._analysis_refresh_inflight.get(backend_kind):
+                return
+            if error:
+                self._analysis_refresh_inflight[backend_kind] = None
+                self._refresh_playback_controls()
+                return
+            if cache_key is not None and result is not None:
+                self._analysis_cache[cache_key] = result
+            self._analysis_refresh_inflight[backend_kind] = None
+            if self._backend_kind_for_mode() == backend_kind:
+                self._refresh_transport_for_mode()
+                self._schedule_playback_prewarm(immediate=False)
+            self._refresh_playback_controls()
+        except Exception as exc:
+            self._threadsafe_backend_log(f"[DEBUG] 分析过滤完成处理失败：{exc}")
 
     def _schedule_drum_report_refresh(self, analysis: Optional[MidiAnalysisResult]) -> None:
         if analysis is None or not getattr(analysis, 'notes', None):
@@ -2976,7 +3172,7 @@ class MainWindow(QMainWindow):
         if self._track_refresh_pending:
             return "切换中", "轨道切换中", "等待轨道切换完成", "等待应用最新轨道选择", False
         if self._analysis_refresh_inflight.get(backend_kind) is not None:
-            return "切换中", "轨道切换中", "等待轨道切换完成", "轨道切换中", False
+            return "准备中", "轨道数据准备中", "等待轨道数据", "正在生成轨道分析数据", False
         analysis = self._analysis_for_backend_kind(backend_kind, allow_build=False)
         if analysis is None:
             return "准备中", "准备中", "等待基础数据", "等待生成可播放分析结果", False
@@ -3076,8 +3272,13 @@ class MainWindow(QMainWindow):
         def worker() -> None:
             try:
                 analysis = analyze_midi(path, pedal_threshold=pedal_threshold, use_gpu=use_gpu)
-                piano_selected = set(analysis.recommended_track_indexes)
-                drum_selected = set(analysis.recommended_drum_indexes)
+                try:
+                    piano_selected = set(analysis.recommended_track_indexes or [])
+                    drum_selected = set(analysis.recommended_drum_indexes or [])
+                except Exception as attr_err:
+                    self._log(f"获取推荐轨道失败：{str(attr_err)}")
+                    piano_selected = set()
+                    drum_selected = set()
                 self.midi_loaded.emit({
                     'token': token,
                     'path': path,
@@ -3088,6 +3289,7 @@ class MainWindow(QMainWindow):
                     'backend_note': backend_note,
                 })
             except Exception as exc:
+                self._log(f"MIDI 分析异常：{type(exc).__name__}: {str(exc)}")
                 self.midi_load_failed.emit({'token': token, 'path': path, 'message': str(exc)})
 
         threading.Thread(target=worker, daemon=True, name='MidiAnalysisWorker').start()
@@ -3101,32 +3303,38 @@ class MainWindow(QMainWindow):
         if analysis is None:
             self._set_midi_loading(False)
             return
-        self.current_analysis = analysis
-        self._invalidate_analysis_cache()
-        self.selected_piano_tracks = set(data.get('piano_selected') or set())
-        self.selected_drum_tracks = set(data.get('drum_selected') or set())
-        self.applied_piano_tracks = set(self.selected_piano_tracks)
-        self.applied_drum_tracks = set(self.selected_drum_tracks)
-        self._populate_track_tree(self._mode_tracks())
-        self._update_track_selection_ui()
-        self._schedule_transport_refresh(immediate=True)
-        bpm_text = f"{analysis.primary_bpm:.1f} BPM" + (" · 多段" if analysis.has_tempo_changes else "")
-        self._set_status_card(self.piano_bpm_card, "当前 MIDI BPM", bpm_text, os.path.basename(path))
-        self._set_status_card(self.drum_bpm_card, "当前 MIDI BPM", bpm_text, os.path.basename(path))
-        backend_text = str(data.get('backend_text') or 'CPU')
-        backend_note = str(data.get('backend_note') or '')
-        summary_text = (
-            f"{os.path.basename(path)}\n总时长 {analysis.duration_sec:.2f}s\n"
-            f"可见音符 {len(analysis.notes)}\n钢琴 / 吉他 / 贝斯推荐 {len(analysis.recommended_track_indexes)} 轨 / 鼓推荐 {len(analysis.recommended_drum_indexes)} 轨\n"
-            f"计算后端：{backend_text}"
-        )
-        if backend_note and backend_note not in backend_text and ("GPU" in backend_note or "CPU" in backend_note):
-            summary_text += f"\n{backend_note}"
-        self.summary_label.setText(summary_text)
-        self._set_midi_loading(False)
-        self._sync_mode_cards()
-        self._refresh_playback_controls()
-        self._log(f"已分析 MIDI：{os.path.basename(path)} | 计算后端：{data.get('backend_text', 'CPU')}")
+        try:
+            self.current_analysis = analysis
+            self._invalidate_analysis_cache()
+            self.selected_piano_tracks = set(data.get('piano_selected') or set())
+            self.selected_drum_tracks = set(data.get('drum_selected') or set())
+            self.applied_piano_tracks = set(self.selected_piano_tracks)
+            self.applied_drum_tracks = set(self.selected_drum_tracks)
+            self._populate_track_tree(self._mode_tracks())
+            self._update_track_selection_ui()
+            self._prefill_analysis_cache()
+            self._schedule_transport_refresh(immediate=True)
+            bpm_text = f"{analysis.primary_bpm:.1f} BPM" + (" · 多段" if analysis.has_tempo_changes else "")
+            self._set_status_card(self.piano_bpm_card, "当前 MIDI BPM", bpm_text, os.path.basename(path))
+            self._set_status_card(self.drum_bpm_card, "当前 MIDI BPM", bpm_text, os.path.basename(path))
+            backend_text = str(data.get('backend_text') or 'CPU')
+            backend_note = str(data.get('backend_note') or '')
+            summary_text = (
+                f"{os.path.basename(path)}\n总时长 {analysis.duration_sec:.2f}s\n"
+                f"可见音符 {len(analysis.notes)}\n钢琴 / 吉他 / 贝斯推荐 {len(analysis.recommended_track_indexes)} 轨 / 鼓推荐 {len(analysis.recommended_drum_indexes)} 轨\n"
+                f"计算后端：{backend_text}"
+            )
+            if backend_note and backend_note not in backend_text and ("GPU" in backend_note or "CPU" in backend_note):
+                summary_text += f"\n{backend_note}"
+            self.summary_label.setText(summary_text)
+            self._set_midi_loading(False)
+            self._sync_mode_cards()
+            self._refresh_playback_controls()
+            self._log(f"已分析 MIDI：{os.path.basename(path)} | 计算后端：{data.get('backend_text', 'CPU')}")
+        except Exception as e:
+            self._log(f"处理 MIDI 加载结果失败：{type(e).__name__}: {str(e)}")
+            self._set_midi_loading(False)
+            QMessageBox.critical(self, "MIDI 处理失败", f"处理分析结果时出错：{str(e)}")
 
     def _on_midi_load_failed(self, payload: object) -> None:
         data = dict(payload or {})
@@ -3155,7 +3363,11 @@ class MainWindow(QMainWindow):
         if analysis is None or not getattr(analysis, 'notes', None):
             self._refresh_playback_controls()
             return
-        self.transport.ensure_prepared()
+        # 确保 transport 的 analysis 已设置
+        if self.transport.analysis is None or id(self.transport.analysis) != id(analysis):
+            self.transport.set_analysis(analysis, prepare=True)
+        else:
+            self.transport.ensure_prepared()
         if backend_kind == 'drum':
             self._schedule_drum_report_refresh(analysis)
         self._refresh_playback_controls()
@@ -3175,7 +3387,6 @@ class MainWindow(QMainWindow):
             self._track_refresh_timer.stop()
         was_pending = self._track_refresh_pending
         self._track_refresh_pending = False
-        self._analysis_refresh_inflight: Dict[str, Optional[object]] = {'piano': None, 'drum': None}
         if force or was_pending or self.transport.analysis is None or self.transport.state.value == 'playing':
             self._refresh_transport_for_mode()
 
@@ -3218,27 +3429,34 @@ class MainWindow(QMainWindow):
         self._track_tree_render_key = render_key
 
     def _on_track_item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
-        self._track_tree_render_key = None
-        selected = self._pending_track_selection_for_mode()
-        track_index = int(item.data(0, Qt.UserRole))
-        if item.checkState(0) == Qt.Checked:
-            selected.add(track_index)
-        else:
-            selected.discard(track_index)
-        self._update_track_selection_ui()
+        try:
+            self._track_tree_render_key = None
+            selected = self._pending_track_selection_for_mode()
+            track_index = int(item.data(0, Qt.UserRole))
+            if item.checkState(0) == Qt.Checked:
+                selected.add(track_index)
+            else:
+                selected.discard(track_index)
+            self._update_track_selection_ui()
+        except Exception as exc:
+            self._threadsafe_backend_log(f"[DEBUG] 轨道项变更处理失败：{exc}")
 
     def _confirm_track_selection(self) -> None:
-        self._track_tree_render_key = None
-        pending = self._pending_track_selection_for_mode()
-        applied = self._applied_track_selection_for_mode()
-        if tuple(sorted(pending)) == tuple(sorted(applied)):
+        try:
+            self._track_tree_render_key = None
+            pending = self._pending_track_selection_for_mode()
+            applied = self._applied_track_selection_for_mode()
+            if tuple(sorted(pending)) == tuple(sorted(applied)):
+                self._update_track_selection_ui()
+                return
+            applied.clear()
+            applied.update(pending)
+            self._invalidate_analysis_cache()
+            self._prefill_analysis_cache()
             self._update_track_selection_ui()
-            return
-        applied.clear()
-        applied.update(pending)
-        self._invalidate_analysis_cache()
-        self._update_track_selection_ui()
-        self._schedule_transport_refresh(immediate=True)
+            self._schedule_transport_refresh(immediate=True)
+        except Exception as exc:
+            self._threadsafe_backend_log(f"[DEBUG] 轨道选择确认失败：{exc}")
 
     def _select_all_tracks(self) -> None:
         self._track_tree_render_key = None
@@ -3258,16 +3476,19 @@ class MainWindow(QMainWindow):
         return self._analysis_for_backend_kind(self._backend_kind_for_mode())
 
     def _refresh_transport_for_mode(self) -> None:
-        self._apply_runtime_config_to_backends()
-        backend_kind = self._backend_kind_for_mode()
-        backend = self.drum_backend if backend_kind == "drum" else self.piano_backend
-        self.transport.set_backend(backend)
-        analysis = self._analysis_for_backend_kind(backend_kind)
-        refresh_key = (backend_kind, id(analysis) if analysis is not None else None, self._backend_config_signature)
-        if analysis is not None and refresh_key != self._transport_refresh_key:
-            self.transport.set_analysis(analysis, prepare=False)
-            self._transport_refresh_key = refresh_key
-        if analysis is not None:
+        try:
+            self._apply_runtime_config_to_backends()
+            backend_kind = self._backend_kind_for_mode()
+            backend = self.drum_backend if backend_kind == "drum" else self.piano_backend
+            self.transport.set_backend(backend)
+            analysis = self._analysis_for_backend_kind(backend_kind, allow_build=False)
+            if analysis is None:
+                self._refresh_playback_controls()
+                return
+            refresh_key = (backend_kind, id(analysis), self._backend_config_signature)
+            if refresh_key != self._transport_refresh_key:
+                self.transport.set_analysis(analysis, prepare=False)
+                self._transport_refresh_key = refresh_key
             if backend_kind == "piano":
                 self.piano_range_label.setText(f"{midi_to_note_name(analysis.min_note)} ~ {midi_to_note_name(analysis.max_note)}")
                 if (not self._performance_mode_enabled()) and self._piano_preview_mode == "detail" and self.piano_roll_detail is not None:
@@ -3278,13 +3499,17 @@ class MainWindow(QMainWindow):
                 if (not self._performance_mode_enabled()) and self._drum_preview_mode == "detail" and self.drum_roll_detail is not None:
                     self.drum_roll_detail.set_analysis(analysis)
                     self.drum_roll_detail.set_position(self.transport.position_sec)
-        if self.current_mode == "drum":
-            if self.current_analysis is not None:
-                drum_analysis = self._analysis_for_backend_kind("drum", allow_build=False)
-                self._refresh_drum_report(drum_analysis)
-            else:
-                self._refresh_drum_report(None)
-        self._schedule_playback_prewarm(immediate=False)
+            if self.current_mode == "drum":
+                if self.current_analysis is not None:
+                    drum_analysis = self._analysis_for_backend_kind("drum", allow_build=False)
+                    self._refresh_drum_report(drum_analysis)
+                else:
+                    self._refresh_drum_report(None)
+            self._schedule_playback_prewarm(immediate=False)
+            self._refresh_playback_controls()
+        except Exception as exc:
+            self._threadsafe_backend_log(f"[DEBUG] 刷新传输失败：{exc}")
+            self._refresh_playback_controls()
 
     def _current_playback_ready_state(self) -> tuple[bool, str]:
         _badge, _status_text, _button_text, reason, ready = self._current_playback_visuals()
@@ -3463,6 +3688,55 @@ class MainWindow(QMainWindow):
             return
         self.transport.seek((self.drum_progress_slider.value() / 1000.0) * self.transport.duration_sec)
 
+    # 播放速度控制方法
+    def _on_speed_changed(self, value: int) -> None:
+        """钢琴/吉他/贝斯页面速度滑块变化"""
+        speed = value / 100.0
+        self.speed_spinbox.blockSignals(True)
+        self.speed_spinbox.setValue(speed)
+        self.speed_spinbox.blockSignals(False)
+        self._apply_speed_to_all(speed)
+
+    def _on_speed_spinbox_changed(self, value: float) -> None:
+        """钢琴/吉他/贝斯页面速度数字框变化"""
+        slider_value = int(value * 100)
+        self.speed_slider.blockSignals(True)
+        self.speed_slider.setValue(slider_value)
+        self.speed_slider.blockSignals(False)
+        self._apply_speed_to_all(value)
+
+    def _on_drum_param_speed_spinbox_changed(self, value: float) -> None:
+        """鼓参数设置页面速度数字框变化"""
+        self._apply_speed_to_all(value)
+
+    def _apply_speed_to_all(self, speed: float) -> None:
+        """应用速度到所有控件和后端"""
+        # 同步所有速度控件
+        self._sync_all_speed_controls(speed)
+        # 应用到 transport
+        self.transport.set_playback_speed(speed)
+        # 保存到配置
+        self.runtime_config["PLAYBACK_SPEED"] = int(speed * 100)
+        self._mark_runtime_config_dirty()
+
+    def _sync_all_speed_controls(self, speed: float) -> None:
+        """同步所有速度控件的值"""
+        slider_value = int(speed * 100)
+        # 钢琴页面
+        if hasattr(self, 'speed_slider'):
+            self.speed_slider.blockSignals(True)
+            self.speed_slider.setValue(slider_value)
+            self.speed_slider.blockSignals(False)
+        if hasattr(self, 'speed_spinbox'):
+            self.speed_spinbox.blockSignals(True)
+            self.speed_spinbox.setValue(speed)
+            self.speed_spinbox.blockSignals(False)
+        # 鼓参数页面（数字框 only）
+        if hasattr(self, 'drum_param_speed_spinbox'):
+            self.drum_param_speed_spinbox.blockSignals(True)
+            self.drum_param_speed_spinbox.setValue(speed)
+            self.drum_param_speed_spinbox.blockSignals(False)
+
     @staticmethod
     def _format_time(sec: float) -> str:
         whole = max(0, int(sec))
@@ -3497,7 +3771,11 @@ class MainWindow(QMainWindow):
             if isinstance(widget, QCheckBox):
                 widget.setChecked(bool(value))
             elif isinstance(widget, QSpinBox):
-                widget.setValue(int(value))
+                # MAX_SIMULTANEOUS 可能是 "none" 字符串，需要特殊处理
+                if isinstance(value, str) and value.strip().lower() in ("none", "", "null"):
+                    widget.setValue(8)  # 默认值
+                else:
+                    widget.setValue(int(value))
             elif isinstance(widget, QDoubleSpinBox):
                 widget.setValue(float(value))
 
@@ -3567,6 +3845,13 @@ class MainWindow(QMainWindow):
         for note_name, count, mapped_name, remark in report.preview_rows:
             self.drum_preview_tree.addTopLevelItem(QTreeWidgetItem([note_name, str(count), mapped_name, remark]))
         self._drum_report_render_key = report_key
+
+    def _load_speed_setting(self) -> None:
+        """加载播放速度设置到所有控件"""
+        speed_percent = int(self.runtime_config.get("PLAYBACK_SPEED", 100))
+        speed = speed_percent / 100.0
+        self._sync_all_speed_controls(speed)
+        self.transport.set_playback_speed(speed)
 
     def _load_config_into_form(self) -> None:
         for spec in SUPPORTED_FIELDS:
@@ -3697,7 +3982,7 @@ class MainWindow(QMainWindow):
                 backend_kind = "piano"
             elif instrument_text in {"吉他", "guitar", "GUITAR"}:
                 backend_kind = "piano"
-        analysis = self._analysis_for_backend_kind(backend_kind) or self.current_analysis
+        analysis = self._analysis_for_backend_kind(backend_kind, allow_build=False) or self.current_analysis
         current_config = dict(self.runtime_config)
         if hasattr(self, "tuner_instrument_combo"):
             current_config["INSTRUMENT_MODE"] = self.tuner_instrument_combo.currentText()
@@ -3745,8 +4030,13 @@ class MainWindow(QMainWindow):
         if not self.tuner_suggestions:
             QMessageBox.information(self, "提示", "请先生成建议参数。")
             return
+        # 自动调参后关闭纯净模式，因为调参目的是使用智能参数而非直出
+        was_pure_mode = self.runtime_config.get("PURE_MODE", False)
+        self.runtime_config["PURE_MODE"] = False
         self.runtime_config.update(self.tuner_suggestions)
         self._mark_runtime_config_dirty()
+        if was_pure_mode:
+            self._log("已自动关闭纯净直出模式以应用调参建议。")
         if hasattr(self, "tuner_instrument_combo"):
             instrument_text = str(self.runtime_config.get("INSTRUMENT_MODE", self.tuner_instrument_combo.currentText()))
             idx = max(0, self.tuner_instrument_combo.findText(instrument_text))
@@ -4005,3 +4295,30 @@ class MainWindow(QMainWindow):
                 self._log_flush_timer.start()
         else:
             self._flush_pending_logs()
+
+    def closeEvent(self, event):
+        """窗口关闭事件 - 确保资源正确释放"""
+        try:
+            # 停止播放
+            if hasattr(self, 'transport') and self.transport:
+                self.transport.stop()
+            # 刷新日志
+            self._flush_pending_logs()
+            # 停止所有定时器
+            if hasattr(self, '_log_flush_timer') and self._log_flush_timer:
+                self._log_flush_timer.stop()
+            if hasattr(self, '_playback_prewarm_timer') and self._playback_prewarm_timer:
+                self._playback_prewarm_timer.stop()
+            if hasattr(self, '_track_refresh_timer') and self._track_refresh_timer:
+                self._track_refresh_timer.stop()
+            if hasattr(self, 'clock_timer') and self.clock_timer:
+                self.clock_timer.stop()
+            if hasattr(self, 'auto_sync_timer') and self.auto_sync_timer:
+                self.auto_sync_timer.stop()
+            if hasattr(self, 'global_hotkey_timer') and self.global_hotkey_timer:
+                self.global_hotkey_timer.stop()
+            if hasattr(self, '_playback_ready_timer') and self._playback_ready_timer:
+                self._playback_ready_timer.stop()
+        except Exception:
+            pass
+        event.accept()

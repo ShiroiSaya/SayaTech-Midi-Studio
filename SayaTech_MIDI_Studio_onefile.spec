@@ -11,7 +11,6 @@ base_datas = [
     ('ui_settings.example.json', '.'),
     ('sayatech_modern/assets/background.png', 'sayatech_modern/assets'),
     ('sayatech_modern/assets/splash.png', 'sayatech_modern/assets'),
-    ('sayatech_modern/assets/app_icon.png', 'sayatech_modern/assets'),
     ('sayatech_modern/assets/app.ico', 'sayatech_modern/assets'),
 ]
 base_binaries = []

@@ -16,7 +16,7 @@ class ConfigDict(TypedDict, total=False):
     MAX_SIMULTANEOUS: Optional[str]
     RETRIGGER_GAP: float
     HIGH_FREQ_COMPAT: bool
-    INSTRUMENT_MODE: Literal["钢琴", "架子鼓"]
+    INSTRUMENT_MODE: Literal["钢琴", "吉他", "贝斯", "架子鼓"]
     PURE_MODE: bool
     LEFTMOST_NOTE: str
     VISIBLE_OCTAVES: int
@@ -36,6 +36,7 @@ class ConfigDict(TypedDict, total=False):
     RETRIGGER_GAP: float
     PEDAL_ON_VALUE: int
     PEDAL_TAP_TIME: float
+    PEDAL_HOLD_MODE: bool
     CHORD_PRIORITY: bool
     CHORD_SPLIT_THRESHOLD: float
     OCTAVE_FOLD_PRIORITY: bool
@@ -59,6 +60,7 @@ class ConfigDict(TypedDict, total=False):
     OCTAVE_LOOKAHEAD: int
     AUTO_ELEVATE: bool
     AUTO_SHIFT_FROM_RANGE: bool
+    PLAYBACK_SPEED: int
 
 
 # UI 设置类型

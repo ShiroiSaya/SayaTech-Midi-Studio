@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add *)",
+      "Bash(git commit -m 'docs: Update README files for v1.0.6 - Replace screenshots with text descriptions *)",
+      "Bash(git push *)",
+      "Bash(ping -c 2 github.com)",
+      "Bash(git config *)",
+      "Bash(git commit -m 'docs: Add v1.0.6 changelog and file update documentation *)",
+      "Bash(git checkout *)",
+      "Bash(git fetch *)",
+      "Bash(git merge master -m 'Merge v1.0.6 updates from master to main *)",
+      "Bash(git merge master --allow-unrelated-histories -m 'Merge v1.0.6 updates from master to main *)",
+      "Bash(git show *)",
+      "Read(//tmp/**)",
+      "Bash(git commit -m 'docs: Update README files for v1.0.6 on main branch *)",
+      "Bash(grep \"\\\\.py$\")",
+      "Bash(git reset *)",
+      "Bash(git commit -m 'feat: Optimize app.py startup flow and splash screen *)",
+      "Bash(git commit -m 'feat: Add accessibility_utils.py - WCAG 2.1 compliance verification *)",
+      "Bash(git commit -m 'feat: Add quick_improvements.py - UI enhancement toolkit *)"
+    ]
+  }
+}
